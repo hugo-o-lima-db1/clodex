@@ -64,7 +64,7 @@ jobs:
           fi
 
       - name: Rebase feature branch
-        if: github.event.inputs.rebase_feature == 'true'
+        if: github.event_name == 'schedule' || github.event.inputs.rebase_feature == 'true'
         run: |
           git checkout "$FEATURE_BRANCH" || {
             echo "feature branch $FEATURE_BRANCH not found on origin; skipping"
