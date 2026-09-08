@@ -107,14 +107,16 @@ export function parseProvidersArgs(args: string[]): {
   removeId?: string;
   authMethod?: ProviderAuthMethod;
   authAccount?: string;
+  addTemplateId?: string;
   error?: string;
 } {
   if (args.length === 0) return { subcommand: 'hub', showHelp: false };
   const [first, ...rest] = args;
   if (first === '--help' || first === '-h') return { subcommand: 'help', showHelp: true };
   if (first === 'add') {
-    if (rest.length > 0) return { subcommand: 'add', showHelp: false, error: `Unknown add option: ${rest[0]}` };
-    return { subcommand: 'add', showHelp: false };
+    if (rest.length > 1) return { subcommand: 'add', showHelp: false, error: `Unknown add option: ${rest[1]}` };
+    if (rest.length === 1 && rest[0]!.startsWith('-')) return { subcommand: 'add', showHelp: false, error: `Unknown add option: ${rest[0]}` };
+    return { subcommand: 'add', showHelp: false, ...(rest.length === 1 ? { addTemplateId: rest[0] } : {}) };
   }
   if (first === 'list') {
     if (rest.length > 0) return { subcommand: 'list', showHelp: false, error: `Unknown list option: ${rest[0]}` };
@@ -175,6 +177,7 @@ ${pc.bold('Usage:')}
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard
   add         Add a built-in provider or sign in with ChatGPT
+  add <id>    Add a specific provider template by id (e.g. verboo, openai)
   auth        Sign in with ChatGPT/Codex-plan OAuth (device code, or --browser)
   list        Show configured providers
   remove      Remove a provider by id
@@ -597,6 +600,23 @@ async function runTemplateAddFlow(
     ]);
   }
 
+  // Templates without a defaultBaseUrl (e.g. Verboo) need a user-supplied
+  // endpoint. Prompt before the key so an empty URL never reaches the
+  // connection probe.
+  let baseUrlOverride: string | undefined;
+  if (!template.defaultBaseUrl) {
+    const urlInput = await p.text({
+      message: template.urlPrompt ?? `${template.name} base URL:`,
+      placeholder: template.urlPlaceholder,
+      validate: val => val && val.trim() ? undefined : 'Base URL cannot be empty',
+    });
+    if (p.isCancel(urlInput)) {
+      p.cancel('Cancelled.');
+      return 0;
+    }
+    baseUrlOverride = String(urlInput).trim();
+  }
+
   const apiKeyInput = await p.password({
     message: `Paste your ${template.name} API key:`,
     validate: val => val.trim() ? undefined : 'Key cannot be empty',
@@ -610,7 +630,7 @@ async function runTemplateAddFlow(
 
   const spinner = p.spinner();
   spinner.start(`Testing connection to ${template.name}...`);
-  const result = await addProviderFromTemplate(template, apiKey);
+  const result = await addProviderFromTemplate(template, apiKey, baseUrlOverride ? { baseUrl: baseUrlOverride } : undefined);
   spinner.stop('');
   reportCredentialCleanup(
     result.credentialCleanupPending === true,
@@ -630,7 +650,15 @@ async function runTemplateAddFlow(
 
 async function runProvidersAddWithCleanupState(
   cleanupState?: ProviderCommandCleanupState,
+  templateId?: string,
 ): Promise<number> {
+  // `clodex providers add <id>` skips the picker and goes straight to the
+  // template flow. An unknown or already-configured id is reported by
+  // runTemplateAddFlow itself, matching the picker's behaviour.
+  if (templateId) {
+    return runTemplateAddFlow(templateId, cleanupState);
+  }
+
   const providers = loadRegistry().providers;
   const configuredIds = providers.map(provider => provider.id);
   const options: Array<{ value: string; label: string; hint: string }> = [];
@@ -677,8 +705,8 @@ async function runProvidersAddWithCleanupState(
   return 0;
 }
 
-export async function runProvidersAdd(): Promise<number> {
-  return runProvidersAddWithCleanupState();
+export async function runProvidersAdd(templateId?: string): Promise<number> {
+  return runProvidersAddWithCleanupState(undefined, templateId);
 }
 
 async function runProvidersRemoveWithCleanupState(
@@ -1059,7 +1087,8 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
 
   if (parsed.subcommand === 'list') return runProvidersList();
   if (parsed.subcommand === 'add') {
-    return runWithCredentialCleanup(state => runProvidersAddWithCleanupState(state));
+    const addTemplateId = parsed.addTemplateId;
+    return runWithCredentialCleanup(state => runProvidersAddWithCleanupState(state, addTemplateId));
   }
   if (parsed.subcommand === 'remove' && parsed.removeId) {
     return runWithCredentialCleanup(state =>

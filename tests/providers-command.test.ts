@@ -1092,7 +1092,7 @@ describe('providers add menu', () => {
     await runProvidersAdd();
 
     const options = selectMock.mock.calls[0]?.[0].options.map((option: { value: string }) => option.value);
-    expect(options).toEqual(['oauth', 'api:openai', 'api:opencode-go']);
+    expect(options).toEqual(['oauth', 'api:openai', 'api:opencode-go', 'api:verboo']);
   });
 
   it('adds OpenCode Go through the shared API-key flow', async () => {
@@ -1129,7 +1129,7 @@ describe('providers add menu', () => {
     await expect(runProvidersAdd()).resolves.toBe(0);
 
     const options = selectMock.mock.calls[0]?.[0].options.map((option: { value: string }) => option.value);
-    expect(options).toEqual(['oauth', 'api:openai']);
+    expect(options).toEqual(['oauth', 'api:openai', 'api:verboo']);
     expect(passwordMock).not.toHaveBeenCalled();
     expect(addTemplateMock).not.toHaveBeenCalled();
   });
@@ -1176,7 +1176,7 @@ describe('providers add menu', () => {
     await expect(runProvidersAdd()).resolves.toBe(0);
 
     const options = selectMock.mock.calls[0]?.[0].options.map((option: { value: string }) => option.value);
-    expect(options).toEqual(['oauth', 'api:openai', 'api:opencode-go']);
+    expect(options).toEqual(['oauth', 'api:openai', 'api:opencode-go', 'api:verboo']);
   });
 
   it('reports pending cleanup after an API-key provider is committed', async () => {
