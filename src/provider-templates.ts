@@ -164,6 +164,20 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     modelSource: 'api-list',
     supported: true,
   },
+  {
+    id: 'verboo',
+    name: 'Verboo',
+    authType: 'api',
+    npm: '@ai-sdk/openai-compatible',
+    // Verboo is an OpenAI-compatible endpoint. The base URL is user-supplied
+    // (there is no single public default), so the add wizard prompts for it.
+    // Convention: baseUrl ends in `/v1`, so `/models` resolves to `/v1/models`.
+    modelsPath: '/models',
+    urlPrompt: 'Verboo OpenAI-compatible base URL (ending in /v1)',
+    urlPlaceholder: 'https://api.verboo.ai/v1',
+    modelSource: 'api-list',
+    supported: true,
+  },
 ];
 
 export function listSupportedTemplates(): ProviderTemplate[] {
