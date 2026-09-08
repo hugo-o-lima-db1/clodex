@@ -1,0 +1,88 @@
+name: Sync upstream
+
+# Auto-sync this fork with bman654/clodex.
+# - Runs daily at 07:17 UTC (off the :00/:30 marks to lighten GitHub's load).
+# - `workflow_dispatch` lets you run it manually, with an option to also rebase
+#   feat/verboo-provider onto the freshly-synced main.
+# - Only pushes to this fork (origin). Never pushes to upstream.
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    inputs:
+      rebase_feature:
+        description: Also rebase feat/verboo-provider onto the new main
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: https://github.com/bman654/clodex.git
+  FEATURE_BRANCH: feat/verboo-provider
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "$UPSTREAM"
+
+      - name: Fetch upstream
+        run: git fetch --no-tags --prune upstream
+
+      - name: Fast-forward main to upstream/main
+        run: |
+          git checkout --track origin/main 2>/dev/null || git checkout main
+          OLD=$(git rev-parse HEAD)
+          git merge --ff-only upstream/main
+          NEW=$(git rev-parse HEAD)
+          echo "old=$OLD" >> "$GITHUB_ENV"
+          echo "new=$NEW" >> "$GITHUB_ENV"
+          if [ "$OLD" = "$NEW" ]; then
+            echo "changed=false" >> "$GITHUB_ENV"
+            echo "main already up to date with upstream/main"
+          else
+            echo "changed=true" >> "$GITHUB_ENV"
+            git push origin main
+          fi
+
+      - name: Rebase feature branch
+        if: github.event.inputs.rebase_feature == 'true'
+        run: |
+          git checkout "$FEATURE_BRANCH" || {
+            echo "feature branch $FEATURE_BRANCH not found on origin; skipping"
+            exit 0
+          }
+          git reset --hard "origin/$FEATURE_BRANCH"
+          if ! git rebase main; then
+            echo "::warning::rebase of $FEATURE_BRANCH onto main hit conflicts"
+            git rebase --abort
+            exit 0
+          fi
+          git push --force-with-lease origin "$FEATURE_BRANCH"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Sync upstream" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- main: \`$old\` → \`$new\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- changed: ${changed:-false}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- feature rebase: ${{ github.event.inputs.rebase_feature == 'true' }}" >> "$GITHUB_STEP_SUMMARY"
