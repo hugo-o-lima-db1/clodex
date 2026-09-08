@@ -9,13 +9,15 @@ import {
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
 
 describe('provider templates', () => {
-  it('offers OpenAI and OpenCode Go API-key templates as addable', () => {
-    expect(listSupportedTemplates().map(t => t.id)).toEqual(['openai', 'opencode-go']);
+  it('offers OpenAI, OpenCode Go and Verboo API-key templates as addable', () => {
+    expect(listSupportedTemplates().map(t => t.id)).toEqual(['openai', 'opencode-go', 'verboo']);
   });
 
   it('filters templates by search query', () => {
     const templates = listSupportedTemplates();
-    expect(filterTemplates(templates, 'open').map(t => t.id)).toEqual(['openai', 'opencode-go']);
+    // 'open' matches OpenAI, OpenCode Go and Verboo (npm @ai-sdk/openai-compatible).
+    expect(filterTemplates(templates, 'open').map(t => t.id)).toEqual(['openai', 'opencode-go', 'verboo']);
+    expect(filterTemplates(templates, 'verboo').map(t => t.id)).toEqual(['verboo']);
     expect(filterTemplates(templates, 'groq')).toEqual([]);
   });
 
@@ -23,6 +25,8 @@ describe('provider templates', () => {
     expect(getTemplateById('openai')?.npm).toBe('@ai-sdk/openai');
     expect(getTemplateById('openai-oauth')?.authType).toBe('oauth');
     expect(getTemplateById('opencode-go')?.staticModelPolicy).toBe('allowlist');
+    expect(getTemplateById('verboo')?.npm).toBe('@ai-sdk/openai-compatible');
+    expect(getTemplateById('verboo')?.modelsPath).toBe('/models');
     expect(getTemplateById('groq')).toBeUndefined();
   });
 
@@ -32,9 +36,9 @@ describe('provider templates', () => {
   });
 
   it('excludes already-configured providers from addable list', () => {
-    expect(listAddableTemplates(['openai']).map(t => t.id)).toEqual(['opencode-go']);
-    expect(listAddableTemplates(['openai', 'opencode-go']).map(t => t.id)).toEqual([]);
-    expect(listAddableTemplates([]).map(t => t.id)).toEqual(['openai', 'opencode-go']);
+    expect(listAddableTemplates(['openai']).map(t => t.id)).toEqual(['opencode-go', 'verboo']);
+    expect(listAddableTemplates(['openai', 'opencode-go', 'verboo']).map(t => t.id)).toEqual([]);
+    expect(listAddableTemplates([]).map(t => t.id)).toEqual(['openai', 'opencode-go', 'verboo']);
   });
 });
 
