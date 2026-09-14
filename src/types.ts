@@ -20,7 +20,7 @@ export interface LocalProviderModel {
   name: string;
   family: string;
   brand: string;
-  modelFormat: 'anthropic' | 'openai';
+  modelFormat: 'anthropic' | 'openai' | 'cloud-code';
   /** Wire id sent to the upstream API (OpenCode api.id); may differ from catalog id, e.g. gpt-5.5-fast → gpt-5.5. */
   upstreamModelId: string;
   baseUrl?: string;        // set for anthropic-format models

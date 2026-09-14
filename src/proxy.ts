@@ -235,7 +235,7 @@ export interface ProxyRoute {
   displayName: string;
   upstreamUrl: string;
   apiKey: string;
-  modelFormat: 'anthropic' | 'openai';
+  modelFormat: 'anthropic' | 'openai' | 'cloud-code';
   contextWindow?: number;
   /** Input size above which the provider bills the whole request at a higher rate. */
   pricingBoundary?: number;
@@ -873,7 +873,7 @@ export interface SingleModelProxyOptions {
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
   providerData?: Record<string, unknown>;
-  modelFormat?: 'anthropic' | 'openai';
+  modelFormat?: 'anthropic' | 'openai' | 'cloud-code';
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;

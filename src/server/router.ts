@@ -390,8 +390,8 @@ async function handleAnthropicMessages(
     return;
   }
 
-  if (model.modelFormat === 'openai') {
-    if (!isSdkMigratedNpm(model.npm)) {
+  if (model.modelFormat === 'openai' || model.modelFormat === 'cloud-code') {
+    if (model.modelFormat === 'openai' && !isSdkMigratedNpm(model.npm)) {
       sendJson(res, 400, { error: { message: `No SDK provider for model: ${model.id}` } });
       return;
     }
@@ -598,7 +598,7 @@ async function handleAnthropicCountTokens(
 
   // Keep the sibling messages route's format contract: a catalog entry this
   // server cannot serve must not be answered with a token count either.
-  if (model.modelFormat !== 'anthropic' && model.modelFormat !== 'openai') {
+  if (model.modelFormat !== 'anthropic' && model.modelFormat !== 'openai' && model.modelFormat !== 'cloud-code') {
     sendJson(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
     return;
   }

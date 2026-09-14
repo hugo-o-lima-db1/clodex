@@ -774,6 +774,18 @@ describe('authenticateProvider', () => {
     expect(result.registryProvider.authRef).toBe(authRef);
   });
 
+  it('refuses to store a credential the provider returned without a refresh token', async () => {
+    vi.mocked(runOpenAiDeviceCodeFlow).mockResolvedValue({
+      tokens: { access_token: 'openai-access', expires_in: 3600 },
+      accountId: 'acct-123',
+    });
+
+    await expect(authenticateProvider('openai')).rejects.toThrow(/refresh token/i);
+
+    expect(provisionProviderCredential).not.toHaveBeenCalled();
+    expect(saveProviderCredential).not.toHaveBeenCalled();
+  });
+
   it('does not persist credentials when the registry cannot be validated', async () => {
     vi.mocked(loadRegistryStrict).mockImplementationOnce(() => {
       throw new Error('Provider registry contains an invalid provider entry.');
@@ -991,6 +1003,6 @@ describe('authenticateProvider', () => {
   });
 
   it('rejects non-OpenAI providers', async () => {
-    await expect(authenticateProvider('xai')).rejects.toThrow('only available for openai');
+    await expect(authenticateProvider('xai')).rejects.toThrow('available for openai (ChatGPT Plus/Pro) and antigravity');
   });
 });

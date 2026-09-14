@@ -36,6 +36,10 @@ export function isTargetCompatibleModel(ctx: TargetCompatibilityContext): Target
     return { compatible: false, reason: 'OpenAI-format model is missing an SDK provider package' };
   }
 
+  if (ctx.model.modelFormat === 'cloud-code') {
+    return { compatible: true };
+  }
+
   return { compatible: false, reason: `Unsupported model format: ${ctx.model.modelFormat}` };
 }
 

@@ -1,6 +1,7 @@
 // src/registry/refresh-models.ts — user-initiated model list refresh per modelSource
 
 import { isDeepStrictEqual } from 'node:util';
+import { getTemplateById } from '../provider-templates.js';
 import { getOAuthAccountSlot } from './oauth-account-storage.js';
 import { fetchAnthropicModels } from './custom-endpoint.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
@@ -320,6 +321,21 @@ async function refreshApiListProvider(
   provider: RegistryProvider,
   apiKey: string,
 ): Promise<{ models: CachedModel[]; baseUrl?: string; error?: string }> {
+  // Antigravity (AGY): discovery is a POST to v1internal:fetchAvailableModels
+  // with the OAuth access token — no GET /models equivalent exists. The
+  // template's fetchModels hook owns the wire details.
+  if (provider.templateId === 'antigravity') {
+    const template = getTemplateById('antigravity');
+    if (!template?.fetchModels) {
+      return { models: [], error: 'Antigravity template is missing its model discovery hook.' };
+    }
+    const baseUrl = provider.api.url?.trim() || template.defaultBaseUrl;
+    try {
+      return { models: await template.fetchModels(apiKey, baseUrl) };
+    } catch (err) {
+      return { models: [], error: err instanceof Error ? err.message : String(err) };
+    }
+  }
   const npm = provider.api.npm ?? '@ai-sdk/openai-compatible';
   // Resolve the retained built-in's OWN template first. `resolveProviderTemplate`
   // reads `templateId` ahead of `id`, so a retained record that names another

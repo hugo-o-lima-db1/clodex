@@ -32,8 +32,13 @@ export type CredentialResolver = (provider: RegistryProvider) => string | null;
 export function resolveEndpoint(
   npm: string,
   apiUrl: string,
-): { format: 'anthropic' | 'openai'; baseUrl?: string; completionsUrl?: string } | null {
+): { format: 'anthropic' | 'openai' | 'cloud-code'; baseUrl?: string; completionsUrl?: string } | null {
   if (!npm) return null;
+  if (npm === 'cloud-code') {
+    // Sentinel npm for the Antigravity/AGY Cloud Code backend — the adapter owns
+    // the v1internal paths, so the URL is carried whole in baseUrl.
+    return { format: 'cloud-code', baseUrl: apiUrl || undefined };
+  }
   if (npm === '@ai-sdk/anthropic') {
     return {
       format: 'anthropic',
@@ -131,7 +136,9 @@ export function cachedModelToLocal(
     name: npm === '@ai-sdk/google' ? normalizeGoogleDisplayName(cached.name, id) : cached.name,
     family,
     brand: npm === '@ai-sdk/google' ? deriveBrand(family) : (cached.brand ?? deriveBrand(cached.family ?? '')),
-    modelFormat: (cached.modelFormat === 'anthropic' || cached.modelFormat === 'openai' ? cached.modelFormat : undefined) ?? endpoint.format,
+    modelFormat: (cached.modelFormat === 'anthropic' || cached.modelFormat === 'openai' || cached.modelFormat === 'cloud-code'
+      ? cached.modelFormat
+      : undefined) ?? endpoint.format,
     upstreamModelId: normalizedUpstream,
     baseUrl: endpoint.baseUrl,
     completionsUrl: endpoint.completionsUrl,

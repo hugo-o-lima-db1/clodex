@@ -670,6 +670,13 @@ async function runProvidersAddWithCleanupState(
       hint: 'OAuth (device code or browser) — no API key needed',
     });
   }
+  if (!configuredIds.includes('antigravity')) {
+    options.push({
+      value: 'oauth:antigravity',
+      label: 'Sign in with Antigravity (AGY)',
+      hint: 'Google OAuth (device code or browser) — Gemini, Claude and GPT-OSS models',
+    });
+  }
   for (const template of listRegistryAddableTemplates(providers)) {
     options.push({
       value: `api:${template.id}`,
@@ -698,6 +705,11 @@ async function runProvidersAddWithCleanupState(
     const method = await promptOAuthMethod();
     if (method === null) return 0;
     return runProvidersAuthWithCleanupState('openai', method, cleanupState);
+  }
+  if (choice === 'oauth:antigravity') {
+    const method = await promptOAuthMethod();
+    if (method === null) return 0;
+    return runProvidersAuthWithCleanupState('antigravity', method, cleanupState);
   }
   if (typeof choice === 'string' && choice.startsWith('api:')) {
     return runTemplateAddFlow(choice.slice('api:'.length), cleanupState);

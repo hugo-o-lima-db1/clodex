@@ -164,6 +164,20 @@ async function loadSdkProviderFactory(npm: string): Promise<SdkProviderFactory> 
 export async function createLanguageModel(spec: ProviderModelSpec): Promise<LanguageModel> {
   const { npm, modelId, apiKey, baseURL } = spec;
 
+  // Google Cloud Code v1internal (Antigravity/AGY) — custom LanguageModel, no
+  // npm SDK exists for this wire format. The sentinel npm 'cloud-code' keys it.
+  if (npm === 'cloud-code') {
+    const { createCloudCodeLanguageModel } = await import('./cloud-code/language-model.js');
+    return createCloudCodeLanguageModel({
+      modelId,
+      apiKey,
+      baseURL,
+      providerId: spec.providerId,
+      headers: spec.headers,
+      onDebug: spec.onDebug,
+    }) as unknown as LanguageModel;
+  }
+
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
     const useResponsesEndpoint = shouldUseOpenAiResponsesEndpoint(modelId);

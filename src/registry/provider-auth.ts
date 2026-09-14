@@ -14,6 +14,13 @@ import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { runOpenAiBrowserFlow, runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
 import {
+  pollGoogleDeviceCodeToken,
+  readAntigravityCliRefreshToken,
+  reuseAntigravityCliSession,
+  runGoogleBrowserFlow,
+  startGoogleDeviceCode,
+} from '../oauth/google.js';
+import {
   supportsNativeOAuth,
   tokensToStoredCredential,
   oauthCredentialToKeychainJson,
@@ -71,18 +78,82 @@ export interface ProviderAuthResult {
 }
 
 const OPENAI_DISPLAY = 'OpenAI ChatGPT Plus/Pro';
+const ANTIGRAVITY_DISPLAY = 'Antigravity (AGY)';
 const PROVIDER_DISPLAY: Record<NativeOAuthProviderId, string> = {
   openai: OPENAI_DISPLAY,
   'openai-oauth': OPENAI_DISPLAY,
+  antigravity: ANTIGRAVITY_DISPLAY,
 };
 
 function openBrowser(url: string): void {
   open(url).catch(() => {});
 }
 
+/**
+ * The Antigravity CLI already holds a signed-in Google session; reusing it
+ * skips the ceremony entirely (and is the only path that works where no
+ * browser can be opened).
+ */
+async function reuseAntigravitySession(): Promise<StoredOAuthCredential | null> {
+  if (!readAntigravityCliRefreshToken()) return null;
+  try {
+    const tokens = await reuseAntigravityCliSession();
+    p.log.info(`Reusing the ${ANTIGRAVITY_DISPLAY} CLI session.`);
+    return tokensToStoredCredential(tokens);
+  } catch {
+    return null;
+  }
+}
+
+async function runGoogleDeviceCodeSignIn(): Promise<StoredOAuthCredential> {
+  const reused = await reuseAntigravitySession();
+  if (reused) return reused;
+  printOAuthStepsPanel(`${ANTIGRAVITY_DISPLAY} — Sign in`, ANTIGRAVITY_DISPLAY);
+  const spinner = p.spinner();
+  spinner.start('Waiting for authorization...');
+  try {
+    const start = await startGoogleDeviceCode();
+    spinner.stop('');
+    p.log.info(`Visit: ${pc.cyan(start.verificationUrl)}`);
+    p.log.info(`Enter code: ${pc.bold(start.userCode)}`);
+    openBrowser(start.verificationUrl);
+    spinner.start('Waiting for authorization...');
+    const tokens = await pollGoogleDeviceCodeToken(start.deviceCode, start.intervalSeconds, start.expiresInMs);
+    spinner.stop(pc.green(`Signed in to ${ANTIGRAVITY_DISPLAY}`));
+    return tokensToStoredCredential(tokens);
+  } catch (err) {
+    spinner.stop('');
+    throw err;
+  }
+}
+
+async function runGoogleBrowserSignIn(): Promise<StoredOAuthCredential> {
+  const reused = await reuseAntigravitySession();
+  if (reused) return reused;
+  printOAuthBrowserPanel(`${ANTIGRAVITY_DISPLAY} — Sign in`, ANTIGRAVITY_DISPLAY);
+  const spinner = p.spinner();
+  spinner.start('Opening your browser...');
+  try {
+    const tokens = await runGoogleBrowserFlow(({ url }) => {
+      spinner.stop('');
+      p.log.info(`If the browser did not open, visit: ${pc.cyan(url)}`);
+      openBrowser(url);
+      spinner.start('Waiting for sign-in in your browser...');
+    });
+    spinner.stop(pc.green(`Signed in to ${ANTIGRAVITY_DISPLAY}`));
+    return tokensToStoredCredential(tokens);
+  } catch (err) {
+    spinner.stop('');
+    throw err;
+  }
+}
+
 async function runNativeDeviceCode(providerId: NativeOAuthProviderId): Promise<StoredOAuthCredential> {
   const label = PROVIDER_DISPLAY[providerId];
   printOAuthStepsPanel(`${label} — Sign in`, label);
+  if (providerId === 'antigravity') {
+    return runGoogleDeviceCodeSignIn();
+  }
 
   const spinner = p.spinner();
   spinner.start('Waiting for authorization...');
@@ -106,6 +177,9 @@ async function runNativeDeviceCode(providerId: NativeOAuthProviderId): Promise<S
 async function runNativeBrowserSignIn(providerId: NativeOAuthProviderId): Promise<StoredOAuthCredential> {
   const label = PROVIDER_DISPLAY[providerId];
   printOAuthBrowserPanel(`${label} — Sign in`, label);
+  if (providerId === 'antigravity') {
+    return runGoogleBrowserSignIn();
+  }
 
   const spinner = p.spinner();
   spinner.start('Opening your browser...');
@@ -293,6 +367,15 @@ async function persistNativeOAuthCredential(
   accountName?: string,
 ): Promise<{ registryProvider: RegistryProvider; credentialCleanupPending: boolean }> {
   const registryId = toOAuthRegistryId(providerId);
+  // A credential without a refresh token authenticates once and then dies on the
+  // first expiry — and writing it would overwrite a healthy one. Keep the stored
+  // credential untouched instead.
+  if (!cred.refresh) {
+    throw new Error(
+      `${registryId}: sign-in returned no refresh token — the stored credential was left unchanged. `
+      + 'Revoke the app in your provider account and sign in again.',
+    );
+  }
   const account = accountName
     ? `oauth:provider:${registryId}:account:${accountName}`
     : `oauth:provider:${registryId}`;
@@ -368,7 +451,7 @@ export async function authenticateProvider(
   const accountName = options.account === undefined ? undefined : validateOAuthAccountName(options.account);
 
   if (!supportsNativeOAuth(providerId)) {
-    throw new Error('OAuth sign-in is only available for openai (ChatGPT Plus/Pro).');
+    throw new Error('OAuth sign-in is available for openai (ChatGPT Plus/Pro) and antigravity (AGY).');
   }
 
   if (accountName) {

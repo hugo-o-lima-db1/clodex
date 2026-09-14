@@ -23,7 +23,12 @@ import type {
 export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel): ProxyRoute | null {
   if (model.modelFormat === 'anthropic' && !model.baseUrl) return null;
   if (model.modelFormat === 'openai' && !isSdkMigratedNpm(model.npm) && !model.completionsUrl) return null;
-  const upstreamUrl = model.modelFormat === 'anthropic' ? model.baseUrl : model.completionsUrl;
+  if (model.modelFormat === 'cloud-code' && !model.apiBaseUrl && !model.baseUrl) return null;
+  const upstreamUrl = model.modelFormat === 'anthropic'
+    ? model.baseUrl
+    : model.modelFormat === 'cloud-code'
+      ? (model.apiBaseUrl ?? model.baseUrl)
+      : model.completionsUrl;
   return {
     aliasId: claudeCodeClientModelId(aliasModelId(model.id, lp.id), model.contextWindow),
     realModelId: model.upstreamModelId,

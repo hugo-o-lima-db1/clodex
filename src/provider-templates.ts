@@ -52,6 +52,14 @@ export interface ProviderTemplate {
   addable?: boolean;
   hidden?: boolean;
   unsupportedReason?: string;
+  /**
+   * Custom model discovery for providers whose catalog is not a GET /models
+   * list (e.g. Antigravity's POST v1internal:fetchAvailableModels). Receives the
+   * resolved credential (OAuth access token for oauth templates) and the base
+   * URL; returns the catalog models. When set, both the add flow and the
+   * periodic refresh dispatch through it instead of fetchTemplateModels.
+   */
+  fetchModels?: (credential: string, baseUrl?: string) => Promise<CachedModel[]>;
 }
 
 /**
@@ -122,6 +130,30 @@ export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string
   return null;
 }
 
+/**
+ * Antigravity (AGY) — Google Cloud Code v1internal backend. OAuth-only: the
+ * sign-in reuses the Antigravity CLI's Google installed-app client and the
+ * credential Antigravity itself persists. Model discovery is the POST
+ * v1internal:fetchAvailableModels (no GET /models equivalent), so the catalog
+ * comes from the template's fetchModels hook. npm 'cloud-code' is the sentinel
+ * that keys the custom LanguageModel in provider-factory.
+ */
+export const ANTIGRAVITY_TEMPLATE_ID = 'antigravity';
+
+export const ANTIGRAVITY_TEMPLATE: ProviderTemplate = {
+  id: ANTIGRAVITY_TEMPLATE_ID,
+  name: 'Antigravity (AGY)',
+  authType: 'oauth',
+  npm: 'cloud-code',
+  defaultBaseUrl: 'https://daily-cloudcode-pa.googleapis.com',
+  modelSource: 'api-list',
+  supported: true,
+  async fetchModels(credential, baseUrl) {
+    const { fetchCloudCodeModels } = await import('./cloud-code/models.js');
+    return fetchCloudCodeModels(credential, baseUrl);
+  },
+};
+
 /** Built-in providers available through `clodex providers add` or OAuth authentication. */
 export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
   {
@@ -178,6 +210,7 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     modelSource: 'api-list',
     supported: true,
   },
+  ANTIGRAVITY_TEMPLATE,
 ];
 
 export function listSupportedTemplates(): ProviderTemplate[] {

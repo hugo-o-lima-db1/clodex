@@ -31,8 +31,8 @@ describe('provider templates', () => {
   });
 
   it('lists only the OpenAI OAuth template for discovery surfaces', () => {
-    expect(listVisibleOAuthTemplates().map(t => t.id)).toEqual(['openai-oauth']);
-    expect(listVisibleOAuthTemplates(['openai-oauth']).map(t => t.id)).not.toContain('openai-oauth');
+    expect(listVisibleOAuthTemplates().map(t => t.id)).toEqual(['antigravity', 'openai-oauth']);
+    expect(listVisibleOAuthTemplates(['openai-oauth']).map(t => t.id)).toEqual(['antigravity']);
   });
 
   it('excludes already-configured providers from addable list', () => {
