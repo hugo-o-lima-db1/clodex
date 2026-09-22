@@ -623,10 +623,17 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
   // Code. The versions directory is consulted only to replace what a wrapper hid,
   // never as a discovery step of its own — otherwise it would answer for installs
   // the normal chain resolves perfectly well.
+  //
+  // It is consulted BEFORE plain discovery, because discovery honours
+  // CLODEX_CLAUDE_PATH: a wrapper exports that variable pinning the install it
+  // launched, so a patch run from inside a session would otherwise resolve to the
+  // running version and never reach a newly installed one. Behind a wrapper, the
+  // install that matters is the one the wrapper will start next — the newest.
   const source = envOverride
     || (existsSync(nativeSymlink) && !symlinkIsWrapper ? nativeSymlink : null)
+    || (symlinkIsWrapper ? findLatestClaudeVersionBinary() : null)
     || (discovered && !discoveredIsWrapper ? discovered : null)
-    || (symlinkIsWrapper || discoveredIsWrapper ? findLatestClaudeVersionBinary() : null);
+    || (discoveredIsWrapper ? findLatestClaudeVersionBinary() : null);
   if (!source) return { ok: false, reason: 'binary-not-found' };
   let resolved: string;
   try {

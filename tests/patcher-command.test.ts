@@ -736,6 +736,38 @@ describe('runPatchCommand npm launcher resolution', () => {
     });
   });
 
+  it('patches the version the clodex wrapper will start, not the one that started this process', () => {
+    // The wrapper exports CLODEX_CLAUDE_PATH pinning the install it launched, so
+    // a `clodex patch` run from inside a Claude Code session used to resolve to
+    // the running version and leave a freshly installed one unpatched forever.
+    const userHome = mkdtempSync(join(tmpdir(), 'clodex-wrapper-home-'));
+    const versions = join(userHome, '.local', 'share', 'claude', 'versions');
+    mkdirSync(versions, { recursive: true });
+    const older = join(versions, '2.1.267');
+    const newer = join(versions, '2.1.280');
+    for (const [path, version] of [[older, '2.1.267'], [newer, '2.1.280']] as const) {
+      writeFileSync(path, `#!/bin/sh\necho "${version} (Claude Code)"\n`, { mode: 0o755 });
+    }
+    const wrapper = join(userHome, '.local', 'bin', 'claude');
+    mkdirSync(dirname(wrapper), { recursive: true });
+    writeFileSync(
+      wrapper,
+      '#!/usr/bin/env bash\nCLODEX_BIN="${CLODEX_BIN:-clodex}"\nexec "$CLODEX_BIN" claude "$@"\n',
+      { mode: 0o755 },
+    );
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = userHome;
+    process.env.CLODEX_CLAUDE_PATH = older;
+    try {
+      expect(resolveClaudeBinaryForPatch()).toMatchObject({ ok: true, binaryPath: realpathSync(newer) });
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
   it('refuses a launcher that names two different programs, before any write', async () => {
     // No real cmd-shim output names two DISTINCT programs. A hand-edited one can,
     // and picking either would patch an install the shell may never start.
