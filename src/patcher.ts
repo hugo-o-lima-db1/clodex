@@ -25,6 +25,8 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -32,13 +34,14 @@ import {
   writeFileSync,
   openSync,
   closeSync,
+  lstatSync,
   realpathSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
-import { getAppHome } from './paths.js';
+import { getAppHome, getUserHome } from './paths.js';
 import { loadPreferences, savePreferences } from './config.js';
 import {
   contextLimitsFrom,
@@ -490,12 +493,77 @@ export type ClaudePatchTarget =
  * another install publishes those other bytes over the user's Claude Code. There
  * is no fallback version for the same reason: an unprobeable binary is an error.
  */
+function isWrapperScript(filePath: string): boolean {
+  try {
+    const st = lstatSync(filePath);
+    if (st.isSymbolicLink()) return false;
+    const fd = openSync(filePath, 'r');
+    const buf = Buffer.alloc(512);
+    const bytesRead = readSync(fd, buf, 0, 512, 0);
+    closeSync(fd);
+    const str = buf.subarray(0, bytesRead).toString('utf8');
+    return str.startsWith('#!') && (
+      str.includes('clodex') ||
+      str.includes('CLODEX_BIN') ||
+      str.includes('CLODEX_CLAUDE_PATH') ||
+      str.includes('Verboo fork wrapper')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function findLatestClaudeVersionBinary(): string | null {
+  const versionsDir = join(getUserHome(), '.local', 'share', 'claude', 'versions');
+  if (!existsSync(versionsDir)) return null;
+  try {
+    const entries = readdirSync(versionsDir)
+      .filter(name => /^\d+\.\d+\.\d+$/.test(name))
+      .sort((a, b) => {
+        const pa = a.split('.').map(Number);
+        const pb = b.split('.').map(Number);
+        for (let i = 0; i < 3; i++) {
+          const diff = (pb[i] ?? 0) - (pa[i] ?? 0);
+          if (diff !== 0) return diff;
+        }
+        return 0;
+      });
+    for (const ver of entries) {
+      const full = join(versionsDir, ver);
+      if (statSync(full).isFile() && !isWrapperScript(full)) return full;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
   const envOverride = process.env['TWEAKCC_CC_INSTALLATION_PATH'];
-  const nativeSymlink = join(homedir(), '.local', 'bin', 'claude');
-  const source = envOverride?.trim()
-    || (existsSync(nativeSymlink) ? nativeSymlink : null)
-    || findClaudeBinary();
+  const nativeSymlink = join(getUserHome(), '.local', 'bin', 'claude');
+  const directSymlink = join(getUserHome(), '.local', 'bin', 'claude.direct');
+
+  let source = envOverride?.trim() || null;
+
+  if (!source && existsSync(nativeSymlink) && !isWrapperScript(nativeSymlink)) {
+    source = nativeSymlink;
+  }
+
+  if (!source && existsSync(directSymlink) && !isWrapperScript(directSymlink)) {
+    source = directSymlink;
+  }
+
+  if (!source) {
+    source = findLatestClaudeVersionBinary();
+  }
+
+  if (!source) {
+    const candidate = findClaudeBinary();
+    if (candidate && !isWrapperScript(candidate)) {
+      source = candidate;
+    }
+  }
+
   if (!source) return { ok: false, reason: 'binary-not-found' };
   let resolved: string;
   try {
@@ -504,7 +572,7 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
     return { ok: false, reason: 'binary-not-found' };
   }
   try {
-    if (!statSync(resolved).isFile()) return { ok: false, reason: 'binary-not-found' };
+    if (!statSync(resolved).isFile() || isWrapperScript(resolved)) return { ok: false, reason: 'binary-not-found' };
   } catch {
     return { ok: false, reason: 'binary-not-found' };
   }
@@ -1042,7 +1110,9 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     p.log.error(verified.message);
     return 1;
   }
-  copyFileSync(plan.backupPath, binaryPath);
+  const tempRestore = `${binaryPath}.restore-${Date.now()}`;
+  copyFileSync(plan.backupPath, tempRestore);
+  renameSync(tempRestore, binaryPath);
   try {
     unlinkSync(getPatchManifestPath());
   } catch {

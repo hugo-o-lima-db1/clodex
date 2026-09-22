@@ -9,9 +9,10 @@ interface HomeEnv {
   USERPROFILE?: string;
 }
 
-function userHome(env: HomeEnv = process.env): string {
+export function getUserHome(env: HomeEnv = process.env): string {
   return env.HOME ?? env.USERPROFILE ?? homedir();
 }
+
 
 export function resolveAppHomeOverride(env: HomeEnv = process.env): string | undefined {
   const override = env.CLODEX_HOME;
@@ -21,7 +22,7 @@ export function resolveAppHomeOverride(env: HomeEnv = process.env): string | und
 export function getAppHome(env: HomeEnv = process.env): string {
   const override = resolveAppHomeOverride(env);
   if (override) return override;
-  return join(userHome(env), `.${APP_DIR_NAME}`);
+  return join(getUserHome(env), `.${APP_DIR_NAME}`);
 }
 
 export function getConfigPath(env: HomeEnv = process.env): string {
