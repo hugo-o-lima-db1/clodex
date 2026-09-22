@@ -56,12 +56,14 @@ import {
   generateAnthropicResponse,
   silenceSdkWarnings,
   anthropicEffortFromRequest,
+  extractClaudeAgentIds,
   extractClaudeSessionId,
   isOpenAiOAuthRoute,
   oauthServiceTier,
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
+import { openCodeGoSessionHeaders } from '../data/opencode-go-models.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
@@ -286,6 +288,7 @@ async function handleAnthropicMessages(
     ? req.headers['x-claude-code-session-id'][0]
     : req.headers['x-claude-code-session-id'];
   const claudeSessionId = extractClaudeSessionId(body as AnthropicRequest, claudeSessionIdHeader);
+  const claudeAgentIds = extractClaudeAgentIds(req.headers);
   if (options.webSocketDiagnosticsLogPath) {
     writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
       requestId,
@@ -324,6 +327,7 @@ async function handleAnthropicMessages(
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
     const authType = model.authType ?? 'api';
     const isOAuth = authType === 'oauth';
+    const goSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
 
     auditInference(options, {
       requestId,
@@ -360,7 +364,7 @@ async function handleAnthropicMessages(
         authType,
         log: message => plog(message),
         claudeCodeSessionId,
-        extraHeaders: model.headers,
+        extraHeaders: { ...model.headers, ...goSessionHeaders },
         refreshToken,
         onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
         signal: clientAbort.signal,
@@ -438,6 +442,8 @@ async function handleAnthropicMessages(
       maxTools: npmMaxTools,
       log: plog,
     });
+    const goSdkSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
+    if (goSdkSessionHeaders) params.headers = { ...params.headers, ...goSdkSessionHeaders };
     const clientWantsStream = Boolean(body.stream);
     // Use the display name in the response model field when masking is on — Claude
     // Desktop shows the response model field in its status bar chip, so this surfaces
@@ -469,7 +475,7 @@ async function handleAnthropicMessages(
             res.write(chunk);
           };
           await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId },
+            { requestId, claudeSessionId, ...claudeAgentIds },
             () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
               abortSignal: clientAbort.signal,
               initialInputTokens: estimateAnthropicInputTokens(body),
@@ -488,7 +494,7 @@ async function handleAnthropicMessages(
           // returns text/event-stream unconditionally), so stream internally and
           // collect the result instead of issuing a non-streaming SDK request.
           const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId },
+            { requestId, claudeSessionId, ...claudeAgentIds },
             () => generateAnthropicResponse(languageModel, params, responseModelId, {
               forceStream: openAiOAuth,
               abortSignal: clientAbort.signal,
@@ -678,6 +684,15 @@ async function handleOpenAIChatCompletions(
   const model = lookupModel(res, options.catalog, body.model);
   if (!model) return;
 
+  // An OpenAI-format body carries no Claude metadata block, so the session id can
+  // only come from the header Claude Code sends. Absent one, openCodeGoSessionHeaders
+  // falls back to its stable per-process id — Go rejects a request with no session
+  // header at all, on this route exactly as on /v1/messages.
+  const openAiSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
+    ? req.headers['x-claude-code-session-id'][0]
+    : req.headers['x-claude-code-session-id'];
+  const goSessionHeaders = openCodeGoSessionHeaders(model, openAiSessionIdHeader);
+
   if (supportsDirectOpenAIChatCompletions(model)) {
     if (model.completionsUrl && !/^https?:\/\//i.test(model.completionsUrl)) {
       sendJson(res, 400, { error: { message: `Invalid provider completionsUrl: must be http:// or https://` } });
@@ -718,7 +733,7 @@ async function handleOpenAIChatCompletions(
     try {
       await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
         authType: model.authType ?? 'api',
-        extraHeaders: model.headers,
+        extraHeaders: { ...model.headers, ...goSessionHeaders },
         refreshToken,
         onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
         signal: clientAbort.signal,
@@ -766,6 +781,7 @@ async function handleOpenAIChatCompletions(
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
   const openAiOAuth = isOpenAiOAuthRoute(model);
   const params = translateOpenAiRequest(body as unknown as OpenAiRequest, { openAiOAuth });
+  if (goSessionHeaders) params.headers = { ...params.headers, ...goSessionHeaders };
   const clientWantsStream = Boolean(body.stream);
   const responseModelId = getResponseModelId(body.model, model, options);
 

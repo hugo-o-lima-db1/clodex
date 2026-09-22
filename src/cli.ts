@@ -15,7 +15,7 @@ import {
   resolveContextStop,
   setSessionContextStops,
 } from './context-modes.js';
-import { resolveContextWindow } from './context-window.js';
+import { lookupKnownContextWindow } from './context-window.js';
 import {
   parseContextStopAssignments,
   savedStopsAfter,
@@ -79,7 +79,8 @@ import {
   startConfiguredHttpProxy,
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
-import { installOutboundProxyDispatcher } from './outbound-proxy.js';
+import { installOutboundDispatcher } from './outbound-proxy.js';
+import { runInstallVscodeLauncherCommand } from './vscode-launcher.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--fast', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model', '--context']);
 
@@ -341,6 +342,16 @@ export function parseArgs(args: string[]): ParsedArgs {
     return parsed;
   }
 
+  if (first === 'install-vscode-launcher') {
+    const parsed = emptyParsed('install-vscode-launcher');
+    for (const arg of rest) {
+      if (arg === '--help' || arg === '-h') parsed.showHelp = true;
+      else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
+      else if (!parsed.error) parsed.error = `Unknown install-vscode-launcher option: ${arg}`;
+    }
+    return parsed;
+  }
+
   if (first !== 'claude') {
     return {
       ...emptyParsed('root'),
@@ -392,6 +403,7 @@ ${pc.bold('Usage:')}
   clodex models
   clodex favorites
   clodex providers
+  clodex install-vscode-launcher
   clodex --help
   clodex --version
 
@@ -406,6 +418,9 @@ ${pc.bold('Commands:')}
   models      Manage favorite models and aliases (max ${MAX_MODEL_CATALOG})
   favorites   Alias for models
   providers   Add or sign in to model providers
+  install-vscode-launcher
+              Windows only: build the .exe the Claude Code VS Code extension
+              needs to launch Claude through clodex
 
 ${pc.bold('Bridge modes (claude and server):')}
   --endpoint   Local Anthropic-format gateway; Claude Code launches with
@@ -460,6 +475,7 @@ ${pc.bold('Providers:')}
   openai         OpenAI API key (platform.openai.com)
   openai-oauth   ChatGPT/Codex plan OAuth — sign in with clodex providers auth openai
   opencode-go    OpenCode Go API key — add with clodex providers add
+  custom-<name>  Any OpenAI-compatible server (OpenRouter, LM Studio, …) — add with clodex providers add
 
 ${pc.bold('Model switching:')}
   Run clodex models to save favorites (max ${MAX_MODEL_CATALOG}).
@@ -514,8 +530,9 @@ ${pc.bold('Common options (both modes):')}
                                ~/.clodex/server-runtime.json, so the
                                clodex-claude wrapper never bridges to it
                                (CLODEX_NO_DISCOVERY=1 works too)
-  --ws-diagnostics             Log sanitized request envelopes and WebSocket
-                               head decisions
+  --ws-diagnostics             Log sanitized request envelopes, WebSocket
+                               head decisions, and the server's usage-limit
+                               reports verbatim (includes account credits)
   --help, --version            Help / version
 
 ${pc.bold('Endpoint mode only')} ${pc.dim('(error if combined with --proxy)')}:
@@ -651,6 +668,43 @@ ${pc.bold('Behavior:')}
   Run clodex patch again after every claude update.`;
 }
 
+export function installVscodeLauncherHelpText(): string {
+  return `${pc.bold('clodex install-vscode-launcher')} v${VERSION}
+Windows only. Build a small native clodex-claude.exe that the Claude Code VS Code
+extension can use as its claudeCode.claudeProcessWrapper, so chats in the editor
+launch Claude Code through clodex.
+
+${pc.bold('Usage:')}
+  clodex install-vscode-launcher
+  clodex install-vscode-launcher --help
+
+${pc.bold('Behavior:')}
+  The extension spawns its process wrapper without a shell, and on Windows npm
+  installs clodex-claude as script shims (clodex-claude, .cmd, .ps1) with no .exe,
+  so the setting fails with spawn EINVAL.
+  This command compiles launcher/clodex-claude-launcher.cs from the clodex package
+  with the C# compiler that ships inside the .NET Framework on Windows 10/11
+  (csc.exe under %WINDIR%\\Microsoft.NET), writes the result to
+  ~/.clodex/bin/clodex-claude.exe, and prints the VS Code setting to paste.
+  Nothing is downloaded and no settings file is edited.
+
+  The launcher runs node.exe with clodex's claude-wrapper.js and hands the
+  extension's arguments through unchanged, so the wrapper bridges the session to
+  a running clodex server --proxy. Node and Claude Code are tied to the launcher
+  with a Windows job object so that cancelling a chat leaves no stray processes;
+  if Windows refuses the job object the launcher says so on stderr and runs anyway.
+  As on macOS and Linux, clodex-claude then runs your clodex-patched install in
+  place of the bundled claude.exe when the two builds match, so clodex models
+  appear in the extension's model picker; re-run clodex patch after updates.
+
+  The paths to node.exe and to the clodex install are compiled in: re-run this
+  command after switching Node versions or moving the clodex install.
+  On macOS and Linux it is not needed — point the setting at clodex-claude itself.
+
+${pc.bold('Setup guide:')}
+  docs/windows-setup.md in the clodex package (also on GitHub).`;
+}
+
 function printHelp(text: string): void {
   console.log(`\n${text}\n`);
 }
@@ -779,7 +833,7 @@ function applyContextStopAssignments(
       return 1;
     }
 
-    const limits = contextLimitsFrom(cached, resolveContextWindow(assignment.modelId));
+    const limits = contextLimitsFrom(cached, lookupKnownContextWindow(assignment.modelId));
     const resolved = resolveContextStop(limits, assignment.stop ?? 'standard');
     const target = modelAliasTarget(assignment);
     // An alias earns the parenthesised target; spelling the full id already showed it.
@@ -1643,9 +1697,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 }
 
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
-  // Honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY for clodex's own outbound calls
-  // (no-op when no proxy env var is set; never throws).
-  await installOutboundProxyDispatcher();
+  // Pin clodex's fetch calls to HTTP/1.1 so Node 26 cannot retain a destroyed
+  // HTTP/2 session, while still honoring HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
+  // Installation is idempotent and warns rather than throwing on failure.
+  await installOutboundDispatcher();
 
   const parsed = parseArgs(args);
 
@@ -1759,6 +1814,18 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       trace: parsed.trace,
       localPatches: parsed.patchLocalPatches,
     });
+  }
+
+  if (parsed.command === 'install-vscode-launcher') {
+    if (parsed.showVersion) {
+      console.log(VERSION);
+      return 0;
+    }
+    if (parsed.showHelp) {
+      printHelp(installVscodeLauncherHelpText());
+      return 0;
+    }
+    return runInstallVscodeLauncherCommand();
   }
 
   if (parsed.showVersion) {

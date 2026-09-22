@@ -1,6 +1,6 @@
 {
   "name": "@bman654/clodex",
-  "version": "2.11.3",
+  "version": "2.16.0",
   "publishConfig": {
     "access": "public"
   },
@@ -29,6 +29,7 @@
   "files": [
     "dist",
     "docs",
+    "launcher",
     "README.md"
   ],
   "engines": {

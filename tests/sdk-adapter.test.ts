@@ -110,6 +110,77 @@ describe('translateTools', () => {
     ]);
   });
 
+  it('sends Artifact without the pattern OpenAI cannot compile (#194)', async () => {
+    // Claude Code 2.1.266 sends this schema on every request; OpenAI compiles
+    // each `pattern` with Python's `re`, answers `bad escape \p`, and 400s the
+    // turn before the model sees it.
+    const fieldPattern = String.raw`^(?!__.*__$)[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}"\\./[\]]{1,200}$`;
+    const collectionPattern = String.raw`^(?!\.\.?(?:\/|$))[A-Za-z0-9_\-.~:@+]{1,200}$`;
+    const requestBodies: unknown[] = [];
+    const provider = createOpenAI({
+      apiKey: 'synthetic-test-key',
+      fetch: async (_input, init) => {
+        requestBodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({
+          id: 'resp_synthetic',
+          model: 'gpt-5.6-terra',
+          output: [],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 0,
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const params = translateRequest({
+      model: 'gpt-5.6-terra',
+      messages: [{ role: 'user', content: 'hello' }],
+      tools: [{
+        name: 'Artifact',
+        description: 'Render an HTML file to an Artifact',
+        input_schema: {
+          type: 'object',
+          properties: {
+            field: { type: 'string', pattern: fieldPattern },
+            collection: { type: 'string', pattern: collectionPattern },
+          },
+        },
+      }],
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+
+    await generateAnthropicResponse(
+      provider.responses('gpt-5.6-terra'), params, 'gpt-5.6-terra');
+
+    expect(requestBodies).toEqual([
+      expect.objectContaining({
+        tools: [{
+          type: 'function',
+          name: 'Artifact',
+          description: 'Render an HTML file to an Artifact',
+          strict: false,
+          parameters: {
+            type: 'object',
+            properties: {
+              field: { type: 'string' },
+              collection: { type: 'string', pattern: collectionPattern },
+            },
+          },
+        }],
+      }),
+    ]);
+  });
+
+  it('leaves the pattern intact on an Anthropic-format route', () => {
+    const pattern = String.raw`^\p{L}+$`;
+    const input_schema = { type: 'object', properties: { field: { type: 'string', pattern } } };
+    for (const npm of ['@ai-sdk/anthropic', '@ai-sdk/google-vertex/anthropic']) {
+      const tools = translateTools([{ name: 'Artifact', input_schema }], npm);
+      expect((tools!.Artifact.inputSchema as { jsonSchema: unknown }).jsonSchema).toBe(input_schema);
+    }
+  });
+
   it('returns undefined for empty/missing tools', () => {
     expect(translateTools(undefined)).toBeUndefined();
     expect(translateTools([])).toBeUndefined();
@@ -2319,5 +2390,58 @@ describe('translateRequest openai promptCacheKey', () => {
 
   it('omits the key for non-OpenAI providers', () => {
     expect(keyOf(req(), '@ai-sdk/xai')).toBeUndefined();
+  });
+});
+
+describe('translated message ids', () => {
+  // Claude Code anchors server-side thread continuation on an assistant message
+  // whose id starts with `msg_`: the next request then carries only the messages
+  // after it, with `thread:{type:"continue"}`. No translated upstream holds that
+  // thread, so a translated reply must never look like an anchor, or the follow-
+  // up after a tool call arrives upstream as a bare tool result and is rejected.
+  it('streams a message id Claude Code will not anchor a thread on', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'text-start', id: 't1' },
+      { type: 'text-delta', id: 't1', text: 'Hello' },
+      { type: 'text-end', id: 't1' },
+      { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const id = events.find(e => e.event === 'message_start')?.data.message.id;
+    expect(typeof id).toBe('string');
+    expect(id.startsWith('msg_')).toBe(false);
+  });
+
+  it('returns a non-streamed message id Claude Code will not anchor a thread on', async () => {
+    const provider = createOpenAI({
+      apiKey: 'synthetic-test-key',
+      fetch: async () => new Response(JSON.stringify({
+        id: 'resp_synthetic',
+        model: 'm',
+        output: [],
+        usage: {
+          input_tokens: 1,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 0,
+          output_tokens_details: { reasoning_tokens: 0 },
+        },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    });
+    const params = translateRequest({
+      model: 'm',
+      messages: [{ role: 'user', content: 'synthetic prompt' }],
+    }, '@ai-sdk/openai');
+    const message = await generateAnthropicResponse(provider.responses('m'), params, 'm') as { id: string };
+    expect(typeof message.id).toBe('string');
+    expect(message.id.startsWith('msg_')).toBe(false);
+  });
+
+  it('gives each translated message a random id, not a timestamp', async () => {
+    const first = await collect([{ type: 'start' }, { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 1, outputTokens: 1 } }]);
+    const second = await collect([{ type: 'start' }, { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 1, outputTokens: 1 } }]);
+    const idOf = (r: typeof first) => r.events.find(e => e.event === 'message_start')?.data.message.id;
+    expect(idOf(first)).toMatch(/^clodex_[0-9a-f]{32}$/);
+    expect(idOf(second)).toMatch(/^clodex_[0-9a-f]{32}$/);
+    expect(idOf(first)).not.toBe(idOf(second));
   });
 });

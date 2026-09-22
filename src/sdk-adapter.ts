@@ -1,5 +1,5 @@
 // Anthropic /v1/messages ↔ Vercel AI SDK. One turn per request; Claude Code owns the tool loop.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { streamText, generateText, tool, jsonSchema } from 'ai';
 import type { LanguageModel, ModelMessage } from 'ai';
 import {
@@ -19,6 +19,8 @@ import {
 } from './provider-factory.js';
 import { resolveUpstreamTools } from './tool-search.js';
 import { sanitizeToolInput } from './tool-input-sanitize.js';
+import { sanitizeToolSchema } from './tool-schema-sanitize.js';
+import { VERTEX_ANTHROPIC_NPM } from './constants.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, sdkUpstreamErrorDetails, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamRequestBudget } from './upstream-retry.js';
@@ -26,6 +28,7 @@ import { trackUpstreamAttempts } from './upstream-attempts.js';
 import { emitParentNotice } from './parent-notice.js';
 import { CLAUDE_CODE_COMPACT_PROMPT_MARKERS } from './claude-code-compact-prompt.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
+import { OpenAiThinkingBlock, openAiReasoningItemId, restoreOpenAiThinking } from './openai-thinking.js';
 
 export { silenceSdkWarnings };
 
@@ -122,6 +125,27 @@ export function extractClaudeSessionId(
   return validClaudeSessionId(headerFallback);
 }
 
+const CLAUDE_AGENT_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Claude Code 2.1.268 marks every request from an in-process subagent with
+ * `x-claude-code-agent-id` (and its parent's id in `x-claude-code-parent-agent-id`);
+ * the main agent sends neither. The value is opaque, so only its shape is checked.
+ */
+export function extractClaudeAgentIds(
+  headers: Record<string, string | string[] | undefined>,
+): { claudeAgentId?: string; claudeParentAgentId?: string } {
+  const read = (name: string): string | undefined => {
+    const raw = headers[name];
+    const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+    return value && CLAUDE_AGENT_ID_RE.test(value) ? value : undefined;
+  };
+  return {
+    claudeAgentId: read('x-claude-code-agent-id'),
+    claudeParentAgentId: read('x-claude-code-parent-agent-id'),
+  };
+}
+
 /** Opaque prompt-cache partition derived from a Claude session UUID. */
 export function claudeSessionPromptCacheKey(sessionId: string): string {
   return 'relay-session-' + createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
@@ -178,6 +202,8 @@ export interface SdkCallParams {
   maxOutputTokens?: number;
   temperature?: number;
   providerOptions?: Record<string, Record<string, unknown>>;
+  /** Per-request upstream headers; `streamText`/`generateText` take them as-is. */
+  headers?: Record<string, string>;
 }
 
 // ── system ───────────────────────────────────────────────────────────────────
@@ -396,8 +422,12 @@ export function translateMessages(
           // content, not prior assistant output_text items.
           parts.push({ type: 'text', text: b.text ?? '' });
         } else if (b.type === 'thinking') {
-          const part = thinkingToSdkPart(b, npm);
-          if (part) parts.push(part);
+          const restored = restoreOpenAiThinking(b.thinking ?? '', b.signature, npm);
+          if (restored) parts.push(...restored);
+          else {
+            const part = thinkingToSdkPart(b, npm);
+            if (part) parts.push(part);
+          }
         } else if (b.type === 'tool_use' && b.id) {
           const { rawId, thoughtSignature } = splitToolUseId(b.id);
           const part: Record<string, unknown> = {
@@ -451,12 +481,15 @@ function toolRequiredProps(tools?: SdkCallParams['tools']): Map<string, Readonly
 
 export function translateTools(anthropicTools?: AnthropicTool[], npm?: string): Record<string, ReturnType<typeof tool>> | undefined {
   if (!anthropicTools?.length) return undefined;
+  // Anthropic-format routes take Claude Code's ECMAScript patterns as written;
+  // every other provider validates them in a dialect that may not compile them.
+  const anthropicFormat = npm === '@ai-sdk/anthropic' || npm === VERTEX_ANTHROPIC_NPM;
   const tools: Record<string, ReturnType<typeof tool>> = {};
   for (const t of anthropicTools) {
     if (!t.name || !t.input_schema) continue;
     tools[t.name] = tool({
       description: t.description ?? '',
-      inputSchema: jsonSchema(t.input_schema),
+      inputSchema: jsonSchema(anthropicFormat ? t.input_schema : sanitizeToolSchema(t.input_schema)),
       strict: npm === '@ai-sdk/openai' ? false : undefined,
     });
   }
@@ -837,6 +870,27 @@ export function forwardAbortSignal(source: AbortSignal | undefined, target: Abor
   return () => source.removeEventListener('abort', forward);
 }
 
+/**
+ * The id clodex gives a message it translated from another provider.
+ *
+ * It must NOT start with `msg_`. Claude Code (the gate is in every build from
+ * 2.1.268 on, and fires in proxy mode when its thread rollout is enabled)
+ * treats an assistant message as an anchor for server-side thread
+ * continuation when its id starts with `msg_`, or when the response carried a
+ * `request-id` header; translated responses never send that header, so the id
+ * alone decides. An anchored follow-up carries
+ * `thread:{type:"continue",previous_message_id}` and only the messages after
+ * the anchor, trusting the server to hold the rest. No translated upstream
+ * holds that state and clodex does not reconstruct it, so the delta reached
+ * the provider as a bare tool result (`No function call found for function
+ * call output`), and Claude Code retried each such request with the full
+ * history. An id outside the anchor prefix makes Claude Code send the full
+ * history in the first place, which is what these routes are built for.
+ */
+function translatedMessageId(): string {
+  return 'clodex_' + randomUUID().replace(/-/g, '');
+}
+
 export async function writeAnthropicStream(
   stream: AsyncIterable<FullStreamPart>,
   modelId: string,
@@ -845,12 +899,13 @@ export async function writeAnthropicStream(
   observer?: AnthropicStreamObserver,
   tools?: SdkCallParams['tools'],
 ): Promise<void> {
-  const messageId = 'msg_' + Date.now();
+  const messageId = translatedMessageId();
   const requiredProps = toolRequiredProps(tools);
   let blockIndex = -1;
   let started = false;
   let openType: 'text' | 'thinking' | 'tool' | null = null;
   let pendingThinkingSig: string | undefined;
+  let openAiThinking: OpenAiThinkingBlock | undefined;
   const idToBlock = new Map<string, number>();
   // Tool input deltas are buffered (not forwarded raw) so the complete input
   // can be sanitized once the SDK's parsed `tool-call` part arrives.
@@ -885,11 +940,14 @@ export async function writeAnthropicStream(
   };
   const closeOpen = () => {
     if (openType === 'thinking') {
+      // Emit the complete signature once: Claude Code replaces, rather than
+      // appends, signature_delta values. Splitting an envelope would lose it.
       emit('content_block_delta', {
         type: 'content_block_delta', index: blockIndex,
-        delta: { type: 'signature_delta', signature: pendingThinkingSig ?? '' },
+        delta: { type: 'signature_delta', signature: openAiThinking?.signature() ?? pendingThinkingSig ?? '' },
       });
       pendingThinkingSig = undefined;
+      openAiThinking = undefined;
     }
     // Stream ended (or moved on) without a tool-call part for this block: emit
     // the buffered raw JSON so the deltas that did arrive are not lost.
@@ -929,18 +987,32 @@ export async function writeAnthropicStream(
         throw streamAbortError(observer?.abortSignal);
 
       case 'reasoning-start':
-        openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
+        // Consecutive OpenAI summaries/items share a live block, so a thinking-only
+        // transport drop has no completed block to prevent Claude Code's retry.
+        // The signature records their identities and boundaries for lossless replay.
+        if (openAiReasoningItemId(part) && part.id) {
+          if (!openAiThinking) {
+            openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
+            openAiThinking = new OpenAiThinkingBlock();
+          }
+          openAiThinking.start(part);
+        } else {
+          openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
+        }
         break;
       case 'reasoning-delta':
         if (openType !== 'thinking') openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
         emit('content_block_delta', {
           type: 'content_block_delta', index: blockIndex,
-          delta: { type: 'thinking_delta', thinking: part.text ?? '' },
+          delta: { type: 'thinking_delta', thinking: openAiThinking ? openAiThinking.append(part) : part.text ?? '' },
         });
         break;
       case 'reasoning-end': {
-        const sig = grabRoundTripSignature(part);
-        if (sig) pendingThinkingSig = sig;
+        if (openAiThinking) openAiThinking.end(part);
+        else {
+          const sig = grabRoundTripSignature(part);
+          if (sig) pendingThinkingSig = sig;
+        }
         break;
       }
 
@@ -1251,7 +1323,7 @@ export async function generateAnthropicResponse(
   reportPromptTokens({ onPromptTokens: options?.onPromptTokens }, usage);
   const requiredProps = toolRequiredProps(params.tools);
   return {
-    id: 'msg_' + Date.now(), type: 'message', role: 'assistant', model: modelId,
+    id: translatedMessageId(), type: 'message', role: 'assistant', model: modelId,
     content: [
       ...(text ? [{ type: 'text', text }] : []),
       ...toolCalls.map(tc => ({

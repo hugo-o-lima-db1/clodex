@@ -43,6 +43,7 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 | OpenAI (ChatGPT / Codex plan) | OAuth | Fully supported by the clodex maintainer |
 | OpenCode Go | API key | Community-supported — maintained by its contributor |
 | Verboo | API key | OpenAI-compatible endpoint — see [Verboo provider](docs/verboo.md) |
+| Custom OpenAI-compatible server (OpenRouter, vLLM, …) | API key, or none | Community-supported — maintained by its contributor |
 
 **Community-supported** means the maintainer holds no account for that service,
 so it cannot be exercised against the live API here or debugged when the vendor
@@ -107,6 +108,9 @@ flowchart LR
 > [!TIP]
 > Using Claude Code's agents view or background agents? Ask your Claude Code agent to read [docs/background-agents.md](docs/background-agents.md) and set it up for you — one global `clodex server --proxy` plus the `clodex-claude` wrapper bin bridges every claude process automatically.
 
+> [!TIP]
+> Using the Claude Code VS Code extension? `clodex-claude` launches your verified clodex-patched install in place of the extension's bundled binary, so clodex models appear in its model picker; follow the [VS Code setup](docs/background-agents.md#vs-code-model-picker). On Windows, `clodex install-vscode-launcher` first builds the `.exe` the extension needs to launch Claude Code through `clodex-claude`; see [docs/windows-setup.md](docs/windows-setup.md).
+
 ## CLI reference
 
 ### `clodex claude [options] [claude-flags]`
@@ -144,7 +148,7 @@ Common options (both modes):
 | `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `server` default |
 | `--port <1-65535>` | Listen port (default 17645) |
 | `--no-discovery` | Don't advertise this server in `~/.clodex/server-runtime.json` (`CLODEX_NO_DISCOVERY=1` also works). Use it for a standalone endpoint the `clodex-claude` wrapper should ignore. |
-| `--ws-diagnostics` | Log sanitized request envelopes and WebSocket head decisions |
+| `--ws-diagnostics` | Log sanitized request envelopes and WebSocket head decisions, plus the usage-limit reports the OpenAI socket sends, verbatim (they include account state such as credits) |
 | `--help`, `--version` | Help / version |
 
 Endpoint mode only (an error if combined with `--proxy`):
@@ -196,7 +200,9 @@ Patch the installed Claude Code binary so clodex favorites and aliases are first
 | `--disable-local-patches` | Disable local patches and rebuild from pristine bytes without them |
 | `--help` | Help |
 
-The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept, and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
+On Windows, when Claude Code was installed with `npm install -g`, the `claude` on your PATH is a small launcher script (`claude.cmd`, `claude.ps1`, and an extensionless one) rather than the program itself; `clodex patch` follows it to the program and patches that. (On macOS and Linux npm makes a symlink instead, which always worked.) If the launcher cannot be followed — its program moved or removed, or it names two different programs — `clodex patch` stops without touching anything and tells you to set `TWEAKCC_CC_INSTALLATION_PATH` to the program directly.
+
+The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept — recorded against the install it was made for, so a machine with two installs of one Claude Code version restores each from its own bytes — and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
 
 #### Local patches (trusted code)
 
@@ -271,6 +277,16 @@ Two things worth knowing about the numbers:
   number first only costs usable context. A provider that declares a share of its own
   is still honoured; clodex just never invents one. Use `--context` if you want a
   smaller window than the provider offers.
+- **A window nobody published is not a ceiling.** Some servers list their models
+  without saying how much context each one takes. Clodex reports the 200,000 Claude
+  Code assumes anyway, but that number is a guess, not a measurement — so
+  `clodex models --context <model>=1m --save` raises it instead of being clamped back
+  down to the guess. Clamping still applies in full wherever a window *is* published,
+  by the provider or by clodex's own catalog. If the model is already baked into a
+  patched binary, re-run `clodex patch` so it picks the new window up. Set this model up
+  before this version? Run `clodex providers refresh-models <provider>` once — an older
+  clodex stored the guess as if the server had published it, and until you refresh it is
+  indistinguishable from a real limit and still clamps.
 - **The account ceiling moves.** It is server-side and per-account, and it has
   changed by more than 2x within a single day in the past. `max` reads whatever the
   catalog reports now and clamps to it, so a stale ceiling shrinks the stop rather
@@ -281,13 +297,19 @@ Two things worth knowing about the numbers:
 | Subcommand | Effect |
 | --- | --- |
 | *(none)* | Provider hub wizard |
-| `add` | Add OpenAI or OpenCode Go with an API key, or sign in with ChatGPT |
+| `add` | Add OpenAI or OpenCode Go with an API key, add a custom OpenAI-compatible server by base URL, or sign in with ChatGPT |
 | `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code; `--browser` for workspaces that disable device codes) |
 | `list` | Show configured providers |
 | `remove <id>` | Remove a provider by id |
 | `refresh-models [id]` | Update cached model lists |
 
-Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), `opencode-go` (OpenCode Go API key), and `verboo` (OpenAI-compatible endpoint). OpenCode Go exposes its Anthropic Messages and Chat Completions models; Responses-only entries are intentionally excluded. See [OpenCode Go provider](docs/opencode-go.md) and [Verboo provider](docs/verboo.md).
+Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), `opencode-go` (OpenCode Go API key), and `verboo` (OpenAI-compatible endpoint). OpenCode Go exposes its Anthropic Messages, Chat Completions, and Responses models; entries whose transport has not been verified against the live endpoint are left out. See [OpenCode Go provider](docs/opencode-go.md) and [Verboo provider](docs/verboo.md).
+
+A **custom OpenAI-compatible server** is any OpenAI-style API, given by its base URL (the part before `/chat/completions`), such as `https://openrouter.ai/api/v1`. `providers add` asks for a name, the base URL and an API key (leave it empty for a local server without auth), lists the server's models to check the connection, and saves the provider as `custom-<name>`. Its models then appear in `clodex models`; once saved as favorites they are addressed as `clodex:custom-<name>:<model>` and can be given a short alias with `clodex models --alias`. The base URL is checked before anything is saved: plain `http://` is accepted only after you confirm it, and only for loopback or private-network addresses, and an `https://` URL whose host is, or resolves to, a loopback (`127.0.0.0/8`, `::1`), private, link-local, unique-local, carrier-grade-NAT or well-known cloud-metadata address is refused. A model's id and name are stored with surrounding whitespace trimmed, and a model whose trimmed id or name still contains a control character is skipped, whether the list is fetched by `providers add` or by `providers refresh-models`, and error text from the server is shown with control characters replaced by spaces. Only the OpenAI-compatible kind is offered in the menu.
+
+### `clodex install-vscode-launcher`
+
+Windows only. Builds `%USERPROFILE%\.clodex\bin\clodex-claude.exe`, the executable the Claude Code VS Code extension can use as its `claudeCode.claudeProcessWrapper`, so chats in the editor launch Claude Code through `clodex-claude` (on Windows npm installs that wrapper as three script shims — extensionless, `.cmd`, `.ps1` — and no executable the extension can spawn). It compiles a short C# source shipped in the package with the compiler already inside the .NET Framework — nothing is downloaded — and prints the setting to paste; it never edits VS Code or Claude settings. The paths to `node.exe` and the clodex install are compiled in, so re-run it after switching Node versions or moving clodex. Setup guide: [docs/windows-setup.md](docs/windows-setup.md).
 
 ### Root
 
@@ -333,7 +355,10 @@ clodex --version    # version
   `CLODEX_CREDENTIAL_HELPER` to an absolute executable path to use an external
   secure store instead; see [credential helpers](docs/credential-helpers.md).
 - Proxied routes forward configured provider headers for API-key and OAuth authentication. Anonymous routes preserve non-credential headers while removing authorization, API-key, cookie, token, secret, and credential-bearing header names before dispatch.
-- `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
+- `CLODEX_CLAUDE_PATH` overrides which Claude Code gets **launched**. It does not choose what
+  `clodex patch` writes to — set `TWEAKCC_CC_INSTALLATION_PATH` for that, and `clodex patch`
+  says so when `CLODEX_CLAUDE_PATH` points somewhere else. The two are separate because a
+  `CLODEX_CLAUDE_PATH` aimed at a wrapper script is right for launching and wrong for patching.
 - **Codex service tier:** `CLODEX_SERVICE_TIER` accepts `fast` (normalized to
   `priority`), `priority`, `flex`, `auto`, or `default`. Clodex requests the
   resolved value only after selecting a ChatGPT/Codex OAuth route; OpenAI
@@ -343,7 +368,7 @@ clodex --version    # version
   this pre-dispatch intent, not proof of wire serialization. If the provider
   SDK reports that it omitted the tier for a model, clodex warns once and the
   backend default remains in use.
-- **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
+- **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT). In proxy mode this also covers the web traffic Claude Code itself makes through the clodex proxy, so web fetches and searches work behind a corporate proxy instead of failing on a blocked direct connection.
 - **Provider timeouts:** `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS` controls how long an
   SDK-backed translated stream may produce no event (default `120000`; range
   `10000`–`3600000` ms). `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS` limits each call

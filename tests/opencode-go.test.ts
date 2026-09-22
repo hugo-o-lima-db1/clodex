@@ -41,18 +41,26 @@ describe('OpenCode Go catalog', () => {
    * update:opencode-go`, the right move is to check the diff and update these
    * numbers on purpose — not to loosen them.
    */
-  it('records its OpenCode catalog source and excludes Responses-only models', () => {
+  it('records its OpenCode catalog source and admits only verified Responses-only models', () => {
     const models = buildOpenCodeGoModels();
     const ids = models.map(model => model.id);
 
     expect(OPENCODE_GO_SOURCE).toBe('https://models.dev/api.json');
     expect(new Date(OPENCODE_GO_SOURCE_FETCHED_AT).toISOString()).toBe(OPENCODE_GO_SOURCE_FETCHED_AT);
-    expect(models).toHaveLength(17);
+    expect(models).toHaveLength(20);
     expect(new Set(ids).size).toBe(models.length);
     expect(ids).not.toContain('grok-4.5');
     expect(new Set(models.map(model => model.modelFormat))).toEqual(new Set(['anthropic', 'openai']));
-    expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(4);
-    expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(13);
+    expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(5);
+    expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(15);
+    expect(models.filter(model => model.npm === '@ai-sdk/openai').map(model => model.id).sort())
+      .toEqual(['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
+    // clodex sends graded effort only for recognised OpenAI/Codex families, so
+    // advertising a control here would promise one that never reaches the wire.
+    for (const id of ['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']) {
+      expect(models.find(model => model.id === id)?.compatibility?.supportsReasoningEffort)
+        .toBe(false);
+    }
   });
 
   it('assigns per-model protocol, endpoint, context, vision, pricing, and compatibility metadata', () => {
@@ -85,11 +93,20 @@ describe('OpenCode Go catalog', () => {
     });
     expect(byId.get('qwen3.6-plus')?.compatibility?.thinkingFormat).toBe('qwen');
     expect(byId.get('kimi-k2.6')?.compatibility?.supportsReasoningEffort).toBe(false);
+    // 2026-09-11 feed: the "(2x usage)" promotional pricing ended; list price doubled.
     expect(byId.get('gpt-5.6-luna')?.cost).toEqual({
-      input: 0.1,
-      output: 0.6,
-      cache_read: 0.01,
-      cache_write: 0.125,
+      input: 0.2,
+      output: 1.2,
+      cache_read: 0.02,
+      cache_write: 0.25,
+    });
+    expect(byId.get('deepseek-v4.1-flash')).toMatchObject({
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+      contextWindow: 1_000_000,
+      modalities: ['text', 'image'],
+      compatibility: { supportsReasoningEffort: false, supportsCountTokens: false },
     });
   });
 
@@ -110,7 +127,7 @@ describe('OpenCode Go catalog', () => {
       apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
     });
     expect(result[1]).toMatchObject({
-      name: 'DeepSeek V4 Pro',
+      name: 'DeepSeek V4 Pro (New)',
       modelFormat: 'openai',
       npm: '@ai-sdk/openai-compatible',
       apiUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
@@ -449,5 +466,41 @@ describe('qwen3.6-plus reasoning toggle', () => {
     for (const base of ['low', 'medium', 'high']) expect(patch.levels).toContain(base);
     expect(projectNativeEffort({ levels: patch.levels, defaultLevel: patch.defaultLevel! }))
       .toBeTruthy();
+  });
+});
+
+describe('OpenCode Go Responses-only models', () => {
+  it('pins a catalog model on the Responses package to the Go /v1 base, but not the provider record', async () => {
+    const { openCodeGoPinnedApiUrl, openCodeGoPinnedModelApiUrl } = await import('../src/registry/resolve-template.js');
+    expect(openCodeGoPinnedModelApiUrl('@ai-sdk/openai')).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+    expect(openCodeGoPinnedModelApiUrl('@ai-sdk/xai')).toBeNull();
+    // Discovery and refresh key on the provider record, which still may not name it.
+    expect(openCodeGoPinnedApiUrl('@ai-sdk/openai')).toBeNull();
+  });
+
+  it('materializes Muse Spark with the Go /v1 base as its SDK base URL', async () => {
+    const { cachedModelToLocal } = await import('../src/registry/materialize.js');
+    const muse = buildOpenCodeGoModels().find(model => model.id === 'muse-spark-1.3-contributor')!;
+    const provider = {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+    } as unknown as Parameters<typeof cachedModelToLocal>[1];
+    const local = cachedModelToLocal(muse as CachedModel, provider);
+    expect(local).not.toBeNull();
+    expect(local!.npm).toBe('@ai-sdk/openai');
+    expect(local!.apiBaseUrl).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+  });
+
+  it('catalogs Muse Spark on the Responses package at the Go /v1 base', () => {
+    const muse = buildOpenCodeGoModels().filter(model => model.id.startsWith('muse-spark-'));
+    expect(muse.map(model => model.id).sort()).toEqual(['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
+    for (const model of muse) {
+      expect(model.modelFormat, model.id).toBe('openai');
+      expect(model.npm, model.id).toBe('@ai-sdk/openai');
+      expect(model.apiUrl, model.id).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+    }
   });
 });

@@ -9,7 +9,7 @@ import {
 } from '../context-modes.js';
 import { applyOAuthSeedContextMetadata } from '../data/openai-oauth-models.js';
 import { isChatGptOAuthProvider } from './provider-kind.js';
-import { resolveContextWindow } from '../context-window.js';
+import { lookupKnownContextWindow } from '../context-window.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import { findModelsDevModel } from './models-dev.js';
@@ -18,7 +18,7 @@ import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js
 import { isValidProviderId } from './validate.js';
 import {
   isRetainedOpenCodeGoProvider,
-  openCodeGoPinnedApiUrl,
+  openCodeGoPinnedModelApiUrl,
   retainedOpenCodeGoTemplate,
 } from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -83,7 +83,7 @@ function resolveMaterializedApiUrl(
   if (!isRetainedOpenCodeGoProvider(provider)) {
     return cached.apiUrl ?? provider.api.url ?? '';
   }
-  return openCodeGoPinnedApiUrl(npm);
+  return openCodeGoPinnedModelApiUrl(npm);
 }
 
 /**
@@ -99,7 +99,7 @@ function projectContextStop(
   LocalProviderModel,
   'contextWindow' | 'rawContextWindow' | 'contextStop' | 'pricingBoundary'
 > {
-  const limits = contextLimitsFrom(cached, resolveContextWindow(modelId));
+  const limits = contextLimitsFrom(cached, lookupKnownContextWindow(modelId));
   const stop = selectContextStop(providerId, modelId);
   const resolved = resolveContextStop(limits, stop);
   return {

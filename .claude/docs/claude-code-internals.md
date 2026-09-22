@@ -285,6 +285,26 @@ built with `pH()` env.
 `utn() ? {...KIs(), ...Qdt()} : pH()`, and `KIs()` copies only
 `["HOME","LOGNAME","PATH","SHELL","TERM","USER"]`.
 
+### Process-wrapper host markers (verified 2.1.273, darwin-arm64; extension 2.1.267/2.1.273)
+
+The inspected VS Code extensions build their top-level Claude environment by setting
+`CLAUDE_CODE_ENTRYPOINT=claude-vscode` after configured environment variables, then deleting
+`CLAUDECODE` and `CLAUDE_CODE_CHILD_SESSION`. They invoke a configured
+`claudeProcessWrapper` as the executable with the bundled Claude path prepended to the SDK
+arguments. Main-chat wrapper stderr is logged to the **Claude VSCode** output channel with a
+`From claude: ...` prefix. The chat SDK uses that sanitized environment directly. Extension helper
+commands normally carry the same values but construct their environment as
+`{...process.env, ...sanitizedEnv}`. A deletion from the sanitized copy therefore cannot remove an
+ambient `CLAUDECODE` inherited by the extension host: in that unusual launch shape the chat remains
+top-level while helpers retain the marker.
+
+Nested CLI launch shapes differ. Tool, hook, and agent child environments set `CLAUDECODE` and/or
+`CLAUDE_CODE_CHILD_SESSION`. Background pty-host launches delete those markers but also pass their
+environment through the entrypoint scrubber, which removes `claude-vscode`, `claude-desktop`, and
+`claude-desktop-3p`. A wrapper can therefore identify the top-level VS Code shape by requiring the
+VS Code entrypoint and neither child marker; background pty hosts are excluded by the missing
+entrypoint rather than by a marker.
+
 ## `NO_PROXY` cannot solve child-env isolation (verified 2.1.221)
 
 It has **no process dimension** — parent and children read the same variables — and it is a denylist
@@ -362,6 +382,37 @@ open thinking block first (`case 'error'` in `src/sdk-adapter.ts`). Either alone
 and tool blocks are still closed: visible output already stops the retry, and a tool block's
 buffered arguments must be flushed.
 
+### Multiple thinking summaries (re-verified 2.1.263, darwin-arm64)
+
+In the pristine `claude-2.1.263-ef5d2909c8af49f3.js` bundle, the parser sets `la` on the
+start of a non-thinking, non-redacted-thinking, non-fallback block. A block stop pushes that
+block's assistant-message envelope into `dc` and sets `mr`, including for thinking. The catch first tests
+`dc.some(message => message.content.some(block => !isFallback(block))) || mr`.
+Inside this completed-content gate, an SSE server/overload error finalizes partial output
+only when `la` is true; its thinking-only case throws `Rb`, recording telemetry
+`fallback_cause: "partial_yield"` instead.
+The socket-error and watchdog branches have separate retry rules, but clodex's in-band
+`websocket_transport_error` is an API error, not a socket error at the client.
+
+The overload branch is still **after** that gate: `La instanceof Lt && AD(La)`, where
+`AD` (@3409360) accepts status 529 or the literal `"type":"overloaded_error"` in the
+message. With `la` false it increments `qp` and retries while `qp < Nle` (`Nle=3`,
+@7157194), for eligible query sources, then takes the non-streaming fallback unless disabled.
+Thus the ordinary exhausted path is three streaming attempts plus one non-streaming request,
+not four streaming attempts. A fallback model or low-priority capacity-wait policy can alter
+that path. The completed-content gate and overload branch are around @9502000–9509900.
+
+Leaving only the **last** thinking block open is insufficient if earlier summaries already
+closed blocks. Clodex now coalesces consecutive OpenAI Responses reasoning into one live
+thinking block, retaining original item/summary boundaries in an opaque signature envelope.
+The stream parser treats signatures as opaque strings (`sl.signature = hp.signature`) and appends
+thinking text verbatim; it does not understand or decode that envelope. This is not a guarantee
+of byte-exact request replay: immediately before sending a request, `oot`/`wZ` recursively scan
+all string values and replace lone UTF-16 surrogates with U+FFFD (@211704–212238 and @9461968).
+Clodex therefore keeps the original summary strings inside its JSON-encoded signature, whose
+escaped surrogate code units survive that sanitizer, rather than depending on unchanged display
+text or sanitizing individual deltas (which would break valid pairs split across deltas).
+
 ## Voice dictation transport (verified 2.1.263, darwin-arm64)
 
 How the dictation client reaches the network, read from the extracted `claude-2.1.263-*.js` bundle
@@ -398,6 +449,81 @@ not have to.
   handler. clodex's passthrough then made an `https.request` with no `upgrade` listener of its own,
   so when the origin answered 101 Node destroyed that socket and `response` never fired, leaving
   the client waiting on the 120 s timeout above. Verified on 22.11.0, 22.14.0 and 24.14.1.
+
+## Tool-call arguments are rewritten at ingest (verified 2.1.273; captured 2.1.267, 2.1.270, 2.1.273)
+
+The arguments a tool call is *echoed* with are not the arguments the model emitted. When an assistant
+message arrives from the API, the client rewrites every `tool_use.input` against the tool's schema
+and stores the rewritten form; the next request sends that. This is what #214 (defaults filled) and
+#225 (strings re-typed) reconcile in clodex. Line numbers are from
+`claude-2.1.273-darwin-arm64.js`; the bundle's own functions were executed with its zod (4.4.3) and
+the behaviour captured against a synthetic Anthropic-format server with each pristine binary in
+`~/.tweakcc`, in bypass mode, under `--allowedTools` and under `acceptEdits`.
+
+- **Where.** `Zq` (L12581) runs on every assistant message (call sites: four on L11543 and the
+  streamed tool-use path on L9596). For each `tool_use` whose tool is in the current tool list it
+  applies, inside one `try`:
+  1. `qKe` → `OYs` (L12552), a generic per-property repair that runs on **every** tool: a string
+     value is JSON-parsed and kept when the parse yields the kind the zod shape (or an MCP tool's
+     JSON schema, resolved by `cMt` — `type` string or array, `$ref` into `$defs`/`definitions`,
+     `anyOf`/`oneOf`, with array/object preferred, then string, then the first non-null scalar) declares
+     for that top-level property — array, object, boolean (no print-back check, one BOM strip), or a
+     finite number that prints back identically (`String(parsed) === raw`, integral for `integer`).
+     `optional`/`nullable`/`default` wrappers are unwrapped; a `preprocess` pipe resolves to
+     `"transform"` and is **skipped**, which is what limits coverage on built-ins. An annotation-only
+     property (`{description}`) counts as `"any"` and is re-typed too.
+  2. `rW` (L11539), per tool: **Read** re-types `offset` only through `UF` (`limit` stays a string —
+     captured); **Bash** runs the whole input through its strict schema, whose `timeout` carries
+     `_H` = `z.preprocess(UF)` (L9822: trim — which also strips U+FEFF — then
+     `/^[-+]?\d+(\.\d+)?$/` and `Number()`) and whose `run_in_background` /
+     `dangerouslyDisableSandbox` carry `sw` = `z.preprocess(k1)` (L7356: exactly `"true"`/`"false"`),
+     then rebuilds the object (also stripping a `cd <cwd> &&` prefix and rewriting `\\;` → `\;` in
+     `command`); **Edit** parses through its schema, filling `replace_all: false` and folding
+     `old_str`/`new_str` aliases; **Write**, **TaskOutput** (fills `block ?? true`,
+     `timeout ?? 30000`) and **ExitPlanMode** have their own cases.
+  If `rW` throws, the catch at L12581 keeps the `qKe` result and skips the per-tool step wholesale.
+  Bash's schema is a strict object, so **one uncoercible value or one unknown key means the
+  per-tool step is skipped and the transcript keeps the generic repair's output** — the scalar
+  strings untouched, unknown key included (captured: `foo:"bar"` echoed with every scalar
+  untouched). It does not drop the key; it is not necessarily the exact model input either, since
+  the generic repair (and its double-escaped-unicode pass) may already have changed another field.
+- **Which tools are re-typed on the transcript.** Bash (`timeout` and its two booleans, via `rW`),
+  Read (`offset` only), ToolSearch (`max_results`, plain schema → generic repair; captured `"5"`→`5`),
+  Agent (`run_in_background`, plain), TaskOutput (filled), Monitor/ExitWorktree/LSP/REPL (plain
+  scalars), and every MCP tool with a number/integer/boolean property. **Not** re-typed:
+  PowerShell, Grep and CronCreate — all their scalars are `_H`/`sw` preprocess pipes, which the
+  generic repair skips, and they have no `rW` case (captured: Grep `head_limit:"5"` echoed as a
+  string). ScheduleWakeup's `delaySeconds` is a pipe too; only its plain `stop`/`noop` are re-typed.
+- **The wire schema hides all of this.** Every pipe appears as plain `{type:"number"|"integer"|
+  "boolean"}`; 11 of the 12 built-in schemas carry `additionalProperties:false`. A server cannot tell
+  which client rule a property falls under.
+- **Not the permission path.** Bypass mode and `--allowedTools` echo identical rewritten arguments
+  (Bash and Edit, all three versions). The tool runner's `inputSchema.safeParse` (L10117,
+  `He=De.data` L10119) feeds permission checks and `tool.call`; neither it nor a decision's
+  `updatedInput` is written into `tool_use.input`.
+- **The wire-echo flag.** The raw wire input is also kept (`aFe`, L9197, as `wireToolInputs` on the
+  message). When `echoWireToolInputs` is on — `wI()` (L9197): env `CLAUDE_CODE_HUMBLE_HAMMOCK`, else
+  GrowthBook `tengu_humble_hammock`, default `false` — **and** the request builder's consistency
+  gate passes (L12575 → `sNr`, L12552; for Bash, `qYs` tolerates exactly the `UF`/`k1` coercions,
+  the `\;` rewrite and the cwd strip), the builder sends the raw input instead; the flag alone is
+  not sufficient. Captured with the env var set: Bash
+  echoes `"5000"` / `"false"` and Edit echoes without `replace_all`. clodex therefore normalizes both
+  sides rather than snapshotting one shape.
+
+Captured pairs (bypass mode, 2.1.273; identical on 2.1.267 and 2.1.270 where marked):
+
+| model emitted | echoed | |
+| --- | --- | --- |
+| Bash `{"command":"ls","timeout":"5000","run_in_background":"false"}` | `{"command":"ls","run_in_background":false,"timeout":5000}` | 267/270/273 |
+| Bash `timeout` `"5000.0"`, `" 5000 "`, `"05"`, `"+5"` | `5000`, `5000`, `5`, `5` | 273 |
+| Bash `{"command":"ls","timeout":"abc","run_in_background":"false"}` | unchanged | |
+| Bash `{"command":"ls","timeout":"5000.0","run_in_background":"0"}` | unchanged (`"0"` fails, so nothing is re-typed) | |
+| Bash `{...,"run_in_background":"False",...,"foo":"bar"}` | unchanged, `foo` kept | |
+| Read `{"file_path":"/etc/hosts","offset":"5","limit":"10"}` | `{"file_path":"/etc/hosts","limit":"10","offset":5}` | 267/270/273 |
+| Read `offset` `"5.5"`, `"05"`, `" 5 "` | `5.5`, `5`, `5` | 273 |
+| ToolSearch `max_results:"5"` | `5` | 273 |
+| Grep `head_limit:"5"` | unchanged | 273 |
+| Edit `{file_path,old_string,new_string}` | `+ "replace_all":false` | 267/270/273 |
 
 ## Things that looked like clodex bugs and were not (not version-specific)
 

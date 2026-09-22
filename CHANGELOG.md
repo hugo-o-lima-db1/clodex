@@ -1,5 +1,120 @@
 # Changelog
 
+## [2.16.0](https://github.com/bman654/clodex/compare/v2.15.0...v2.16.0) (2026-09-21)
+
+
+### Features
+
+* **opencode-go:** add the Muse Spark models, which clodex could not reach before ([c68fa2a](https://github.com/bman654/clodex/commit/c68fa2a195192624ed232c87c21d699ddf838300))
+
+
+### Bug Fixes
+
+* **models:** let you raise the context window on a model whose provider publishes none ([#259](https://github.com/bman654/clodex/issues/259)) ([3e2e3df](https://github.com/bman654/clodex/commit/3e2e3df6b81b69c18a36fc198b4ec0a33dcd88e3))
+* **proxy:** send web traffic through your HTTPS_PROXY so it works behind a corporate proxy ([be5f9a4](https://github.com/bman654/clodex/commit/be5f9a4d4530ed684246057f046e76b4224680d7))
+
+## [2.15.0](https://github.com/bman654/clodex/compare/v2.14.1...v2.15.0) (2026-09-19)
+
+
+### Features
+
+* **providers:** add any OpenAI-compatible server, like OpenRouter, from providers add ([#255](https://github.com/bman654/clodex/issues/255)) ([ecd0c28](https://github.com/bman654/clodex/commit/ecd0c28db4ff2f17875e9fb665c0ef08468888ea))
+
+## [2.14.1](https://github.com/bman654/clodex/compare/v2.14.0...v2.14.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **models:** stop a custom model alias from disappearing when its name matches other code ([#247](https://github.com/bman654/clodex/issues/247)) ([e55555f](https://github.com/bman654/clodex/commit/e55555fbac7ac66be59b26a7109b8358c1917a84))
+* **openai:** stop the wasted failed request after each tool call on non-Anthropic models ([#252](https://github.com/bman654/clodex/issues/252)) ([4c373a1](https://github.com/bman654/clodex/commit/4c373a1de2eb16fcafb88481fb3471c0899dd75c))
+* **proxy:** stop models from forgetting the conversation after a tool call ([#253](https://github.com/bman654/clodex/issues/253)) ([6d5b2bd](https://github.com/bman654/clodex/commit/6d5b2bd8afd97b9c56b3153de85039a33fa3afdf))
+
+## [2.14.0](https://github.com/bman654/clodex/compare/v2.13.1...v2.14.0) (2026-09-17)
+
+
+### Features
+
+* **launch:** add a Windows launcher so the VS Code extension can run Claude through clodex ([#243](https://github.com/bman654/clodex/issues/243)) ([a3d8693](https://github.com/bman654/clodex/commit/a3d8693766f8068c3e7b42ec1d17ced8600d0726))
+* **oauth:** log OpenAI usage limits to help diagnose depleted allowances ([#237](https://github.com/bman654/clodex/issues/237)) ([db43de6](https://github.com/bman654/clodex/commit/db43de60a3f7bd5754d6f4fdff23ea7dee3ecd1c))
+
+
+### Bug Fixes
+
+* **launch:** show clodex models in the VS Code extension picker on macOS and Linux ([#244](https://github.com/bman654/clodex/issues/244)) ([97073ce](https://github.com/bman654/clodex/commit/97073cebe2dcaedd8bb0237643cba0b86b3b1abf))
+* **launch:** show clodex models in the VS Code extension picker on Windows ([#246](https://github.com/bman654/clodex/issues/246)) ([f61aca7](https://github.com/bman654/clodex/commit/f61aca7479a40dd8d0533a6fb150b85049392b72))
+* **oauth:** keep conversations cached after tool calls with number or true/false options ([#242](https://github.com/bman654/clodex/issues/242)) ([41541ba](https://github.com/bman654/clodex/commit/41541ba97ca6e03c2b6cf6571df5457cd01ee54d))
+
+## [2.13.1](https://github.com/bman654/clodex/compare/v2.13.0...v2.13.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **providers:** keep Node 26 requests working after a connection drops ([#239](https://github.com/bman654/clodex/issues/239)) ([59810d0](https://github.com/bman654/clodex/commit/59810d03a87d27cf274aca8cee55e95e53cf474a))
+
+## [2.13.0](https://github.com/bman654/clodex/compare/v2.12.2...v2.13.0) (2026-09-14)
+
+
+### Features
+
+* **oauth:** keep parallel conversations cached instead of dropping them at a fixed limit ([#236](https://github.com/bman654/clodex/issues/236)) ([acade46](https://github.com/bman654/clodex/commit/acade463f315dd3a5f2969f666caf613bb335f4e)), closes [#222](https://github.com/bman654/clodex/issues/222)
+
+## [2.12.2](https://github.com/bman654/clodex/compare/v2.12.1...v2.12.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* **oauth:** stop resending the whole conversation uncached after an approved tool call ([#214](https://github.com/bman654/clodex/issues/214)) ([0369ea7](https://github.com/bman654/clodex/commit/0369ea7ac76b0023be40780373f08e0f3607d91a))
+* **opencode-go:** make OpenCode Go models answer again and add DeepSeek V4.1 Flash ([#213](https://github.com/bman654/clodex/issues/213)) ([4295a39](https://github.com/bman654/clodex/commit/4295a399877801d4f84814f2d40ad93532355547))
+
+## [2.12.1](https://github.com/bman654/clodex/compare/v2.12.0...v2.12.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **patch:** keep two Claude Code installs of one version from clobbering each other on restore ([#228](https://github.com/bman654/clodex/issues/228)) ([3581e39](https://github.com/bman654/clodex/commit/3581e3971817dff02ea87097bccbe43afd0d397a))
+* **patch:** say which install clodex will patch when CLODEX_CLAUDE_PATH points elsewhere ([#227](https://github.com/bman654/clodex/issues/227)) ([fd11d76](https://github.com/bman654/clodex/commit/fd11d7614c433e037b9414fa15ce3b1880160c5d))
+* **patch:** stop --restore from leaving claude unable to start on macOS ([#226](https://github.com/bman654/clodex/issues/226)) ([27c6cee](https://github.com/bman654/clodex/commit/27c6ceeb9fdc1b573ff557e8b74b839f031c3dc6))
+
+## [2.12.0](https://github.com/bman654/clodex/compare/v2.11.7...v2.12.0) (2026-09-11)
+
+
+### Features
+
+* **oauth:** keep prompt caching when several subagents are given the same prompt ([#215](https://github.com/bman654/clodex/issues/215)) ([2967c95](https://github.com/bman654/clodex/commit/2967c9532196c519529f34793928bf473f39a805))
+
+## [2.11.7](https://github.com/bman654/clodex/compare/v2.11.6...v2.11.7) (2026-09-11)
+
+
+### Bug Fixes
+
+* **oauth:** keep more cached conversations alive when many subagents run at once ([#221](https://github.com/bman654/clodex/issues/221)) ([a8b7fd8](https://github.com/bman654/clodex/commit/a8b7fd81f76df00244db45d533b8b871485f5ca8))
+* **oauth:** keep prompt caching when many subagents start at the same moment ([#219](https://github.com/bman654/clodex/issues/219)) ([50f8dd3](https://github.com/bman654/clodex/commit/50f8dd38aba58e616c87314cfd98c6a693ea8079)), closes [#209](https://github.com/bman654/clodex/issues/209)
+* **oauth:** restore prompt caching for parallel subagents on ChatGPT models ([#211](https://github.com/bman654/clodex/issues/211)) ([9bd5205](https://github.com/bman654/clodex/commit/9bd5205fe87c45be0e8739f57928f64260819a8a))
+
+## [2.11.6](https://github.com/bman654/clodex/compare/v2.11.5...v2.11.6) (2026-09-09)
+
+
+### Bug Fixes
+
+* **openai:** stop tools with unusual regexes from failing every request in the session ([#203](https://github.com/bman654/clodex/issues/203)) ([d8767b5](https://github.com/bman654/clodex/commit/d8767b5f33d19c826fc2ab5541f298d2f12c8c32))
+* **patch:** explain incomplete Claude Code installs so users can repair them ([#206](https://github.com/bman654/clodex/issues/206)) ([759ffff](https://github.com/bman654/clodex/commit/759ffff50831b0820d38643504ad2f6efcd14cdc))
+* **patch:** refuse to restore Claude Code from a backup that belongs to a different install ([2a511c4](https://github.com/bman654/clodex/commit/2a511c4f2035c94750659cfc2ed9ff58bdf2babe)), closes [#199](https://github.com/bman654/clodex/issues/199)
+
+## [2.11.5](https://github.com/bman654/clodex/compare/v2.11.4...v2.11.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* **openai:** keep Artifact tools working on OpenAI models instead of failing every request ([#195](https://github.com/bman654/clodex/issues/195)) ([383729c](https://github.com/bman654/clodex/commit/383729c45b5ae4aedd5cf5429d8fe90c982aa6eb))
+* **patch:** patch Claude Code installed with npm on Windows, instead of failing to detect it ([#201](https://github.com/bman654/clodex/issues/201)) ([10a61f6](https://github.com/bman654/clodex/commit/10a61f607c78e0925c376094379eb6eed0caa193))
+
+## [2.11.4](https://github.com/bman654/clodex/compare/v2.11.3...v2.11.4) (2026-09-08)
+
+
+### Bug Fixes
+
+* **openai:** retry connection drops during thinking so agents can keep working ([#191](https://github.com/bman654/clodex/issues/191)) ([b314b38](https://github.com/bman654/clodex/commit/b314b38366034b2bb031393ad259b95cd3b216b0))
+
 ## [2.11.3](https://github.com/bman654/clodex/compare/v2.11.2...v2.11.3) (2026-09-07)
 
 

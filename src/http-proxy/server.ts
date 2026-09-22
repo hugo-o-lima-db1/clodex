@@ -13,6 +13,7 @@ import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
+import { emitParentNotice } from '../parent-notice.js';
 import { passthroughUpstreamRetries } from '../upstream-retry.js';
 import {
   outboundHttpProxyAgent,
@@ -694,6 +695,13 @@ function forwardToAdapter(
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
+        // Subagent identity: the relay partitions ChatGPT WebSocket heads by it.
+        ...(typeof req.headers['x-claude-code-agent-id'] === 'string'
+          ? { 'x-claude-code-agent-id': req.headers['x-claude-code-agent-id'] }
+          : {}),
+        ...(typeof req.headers['x-claude-code-parent-agent-id'] === 'string'
+          ? { 'x-claude-code-parent-agent-id': req.headers['x-claude-code-parent-agent-id'] }
+          : {}),
         ...(lifecycle ? { 'x-relay-request-id': lifecycle.requestId } : {}),
       },
     }, upstreamRes => {
@@ -1141,6 +1149,20 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   });
 
   const sockets = new Set<Socket>();
+  let warnedConnectSelfProxy = false;
+  // One agent per proxy URL. agent.connect() opens a fresh socket on every
+  // call, so sharing is safe, and a malformed proxy URL then warns once
+  // instead of on every CONNECT for the life of a standalone server.
+  const connectTunnelAgents = new Map<string, ReturnType<typeof outboundHttpProxyAgent>>();
+  const connectTunnelAgent = (
+    proxyUrl: string,
+    targetUrl: string,
+  ): ReturnType<typeof outboundHttpProxyAgent> => {
+    if (!connectTunnelAgents.has(proxyUrl)) {
+      connectTunnelAgents.set(proxyUrl, outboundHttpProxyAgent(targetUrl));
+    }
+    return connectTunnelAgents.get(proxyUrl);
+  };
   mitmServer.on('upgrade', (req, socket, head) => {
     forwardAnthropicUpgrade(
       req,
@@ -1165,9 +1187,91 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return;
     }
 
+    // Node's http server drops its own 'error' listener once it hands the
+    // socket to 'connect'. Without a replacement a client reset -- or an EPIPE
+    // on the 400 write below -- surfaces as an uncaughtException (issue #233).
+    clientSocket.once('error', () => clientSocket.destroy());
     const target = authorityParts(req.url ?? '');
     if (!target) {
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
+      return;
+    }
+    const targetUrl = `https://${req.url}`;
+    const outboundProxyUrl = outboundProxyUrlForTarget(targetUrl);
+    // A bridge URL exported into this shell can name this very listener. Left
+    // alone, every non-intercepted CONNECT would tunnel back into the same
+    // handler, which would tunnel again, until the process runs out of
+    // descriptors. The raw Anthropic passthrough guards the same way below.
+    //
+    // Read the bound address here rather than caching it after startup:
+    // `listenTcpServer` resolves `listen()` and only then probes the port, so
+    // the socket accepts connections while that probe is still running. A
+    // CONNECT arriving in that window would find an unset cache and disarm the
+    // guard. This handler cannot run before the server is listening, so
+    // `address()` is always populated by the time it does.
+    const bound = proxyServer.address();
+    const selfTargeting = outboundProxyUrl !== undefined
+      && bound !== null
+      && typeof bound !== 'string'
+      && proxyUrlTargetsListener(outboundProxyUrl, bound.address, bound.port);
+    if (selfTargeting && !warnedConnectSelfProxy) {
+      warnedConnectSelfProxy = true;
+      // `launchClaude` mutes the parent's stderr for the child's lifetime, and
+      // this fires while the child is running, so a bare console.error is never
+      // seen on the `clodex claude` path.
+      emitParentNotice(
+        'clodex: HTTP(S)_PROXY points at this proxy; tunneling CONNECT direct',
+      );
+    }
+    const outboundAgent = outboundProxyUrl !== undefined && !selfTargeting
+      ? connectTunnelAgent(outboundProxyUrl, targetUrl)
+      : undefined;
+    if (outboundAgent) {
+      let upstream: net.Socket | undefined;
+      let proxyConnectStatus: number | undefined;
+      req.once('proxyConnect', (response: { statusCode?: number }) => {
+        proxyConnectStatus = response.statusCode;
+      });
+      clientSocket.once('close', () => {
+        if (upstream && !upstream.destroyed) upstream.destroy();
+      });
+      void outboundAgent.connect(req as unknown as http.ClientRequest, {
+        host: target.host,
+        port: target.port,
+        secureEndpoint: false,
+      }).then(connected => {
+        upstream = connected;
+        if (proxyConnectStatus !== 200 || clientSocket.destroyed) {
+          connected.destroy();
+          if (!clientSocket.destroyed) {
+            clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+          }
+          return;
+        }
+        let tunnelEstablished = false;
+        sockets.add(connected);
+        connected.once('close', () => {
+          sockets.delete(connected);
+          if (tunnelEstablished && !clientSocket.destroyed) clientSocket.destroy();
+        });
+        connected.once('error', () => {
+          if (clientSocket.destroyed) return;
+          if (tunnelEstablished) {
+            clientSocket.destroy();
+            return;
+          }
+          clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+        });
+        tunnelEstablished = true;
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length > 0) connected.write(head);
+        clientSocket.pipe(connected);
+        connected.pipe(clientSocket);
+      }).catch(() => {
+        if (!clientSocket.destroyed) {
+          clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+        }
+      });
       return;
     }
     const upstream = net.connect(target.port, target.host);
@@ -1212,7 +1316,6 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     adapter?.close();
     throw err;
   }
-
   if (anthropicProxyUrl && proxyUrlTargetsListener(
     anthropicProxyUrl,
     address.address,
@@ -1243,6 +1346,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => proxyServer.close(() => resolve()));
       mitmServer.close();
+      for (const agent of connectTunnelAgents.values()) agent?.destroy();
+      connectTunnelAgents.clear();
       anthropicAgent?.destroy();
       adapter?.close();
     },

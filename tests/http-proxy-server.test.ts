@@ -44,12 +44,124 @@ function replaceOutboundProxyEnv(httpsProxy?: string): () => void {
   };
 }
 
-async function listen(server: http.Server | https.Server): Promise<number> {
+/**
+ * Collects lines raised through `emitParentNotice`, the channel these warnings
+ * use so they survive the stderr mute `launchClaude` installs for the child's
+ * lifetime. The channel writes to `process.stderr`, so a console spy no longer
+ * sees them.
+ */
+function captureParentNotices(): {
+  lines: () => string[];
+  clear: () => void;
+  restore: () => void;
+} {
+  const captured: string[] = [];
+  const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+    chunk: string | Uint8Array,
+    ...rest: unknown[]
+  ) => {
+    captured.push(String(chunk));
+    const callback = rest.find(arg => typeof arg === 'function');
+    if (typeof callback === 'function') (callback as () => void)();
+    return true;
+  }) as typeof process.stderr.write);
+  return {
+    lines: () => captured.flatMap(chunk => chunk.split('\n')).filter(line => line.length > 0),
+    clear: () => { captured.length = 0; },
+    restore: () => spy.mockRestore(),
+  };
+}
+
+async function listen(server: net.Server): Promise<number> {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server did not bind');
   return address.port;
+}
+
+/** Accumulates everything a socket receives and waits for a marker within it. */
+function socketReader(socket: net.Socket): {
+  until: (needle: string) => Promise<string>;
+} {
+  let received = '';
+  let check: (() => void) | undefined;
+  socket.on('data', chunk => {
+    received += chunk.toString();
+    check?.();
+  });
+  return {
+    until: async (needle: string) => {
+      if (!received.includes(needle)) {
+        await new Promise<void>(resolve => {
+          check = () => {
+            if (!received.includes(needle)) return;
+            check = undefined;
+            resolve();
+          };
+        });
+      }
+      return received;
+    },
+  };
+}
+
+/** A target that answers every chunk with `echo:<chunk>`, so a tunnel's two directions are separable. */
+async function startEchoTarget(): Promise<{ port: number; close: () => Promise<void> }> {
+  const open = new Set<net.Socket>();
+  const server = net.createServer(socket => {
+    open.add(socket);
+    socket.once('close', () => open.delete(socket));
+    socket.on('error', () => socket.destroy());
+    socket.on('data', chunk => socket.write(Buffer.concat([Buffer.from('echo:'), chunk])));
+  });
+  const port = await listen(server);
+  return {
+    port,
+    close: async () => {
+      for (const socket of open) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}
+
+/** An upstream HTTP proxy that really tunnels, or refuses with a status line. */
+async function startTunnelingProxy(
+  options: { refuseWith?: string } = {},
+): Promise<{ port: number; authorities: string[]; close: () => Promise<void> }> {
+  const authorities: string[] = [];
+  const open = new Set<net.Socket>();
+  const server = http.createServer();
+  server.on('connect', (req, clientSocket, head) => {
+    authorities.push(req.url ?? '');
+    open.add(clientSocket);
+    clientSocket.once('close', () => open.delete(clientSocket));
+    clientSocket.on('error', () => clientSocket.destroy());
+    if (options.refuseWith !== undefined) {
+      clientSocket.end(`HTTP/1.1 ${options.refuseWith}\r\n\r\n`);
+      return;
+    }
+    const [host = '', port = ''] = (req.url ?? '').split(':');
+    const target = net.connect(Number(port), host);
+    open.add(target);
+    target.once('close', () => open.delete(target));
+    target.on('error', () => target.destroy());
+    target.once('connect', () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length > 0) target.write(head);
+      clientSocket.pipe(target);
+      target.pipe(clientSocket);
+    });
+  });
+  const port = await listen(server);
+  return {
+    port,
+    authorities,
+    close: async () => {
+      for (const socket of open) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
 }
 
 async function connectMitm(proxyPort: number, ca: string): Promise<tls.TLSSocket> {
@@ -394,6 +506,178 @@ describe('selective HTTP proxy', () => {
     expect(shouldInterceptConnect('example.com:443')).toBe(false);
   });
 
+  it('routes passthrough CONNECT tunnels through HTTPS_PROXY, head and both directions', async () => {
+    // Acknowledging the CONNECT proves only route selection. Replaying a head
+    // and then exchanging bytes is what distinguishes a working tunnel from a
+    // handshake with no pipes behind it.
+    const target = await startEchoTarget();
+    const upstream = await startTunnelingProxy();
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${upstream.port}`);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const reader = socketReader(client);
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${target.port} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${target.port}\r\n\r\nHELLO`,
+      );
+      await reader.until('echo:HELLO');
+      client.write('PING');
+      const received = await reader.until('echo:PING');
+
+      expect(received).toContain('200 Connection Established');
+      expect(upstream.authorities).toEqual([`127.0.0.1:${target.port}`]);
+    } finally {
+      client.destroy();
+      restoreProxyEnv();
+      await proxy.close();
+      await upstream.close();
+      await target.close();
+    }
+  });
+
+  it('answers 502 when the outbound proxy refuses the CONNECT', async () => {
+    const upstream = await startTunnelingProxy({
+      refuseWith: '407 Proxy Authentication Required',
+    });
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${upstream.port}`);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const reader = socketReader(client);
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        'CONNECT non-anthropic.example:443 HTTP/1.1\r\n'
+        + 'Host: non-anthropic.example:443\r\n\r\n',
+      );
+      const received = await reader.until('502 Bad Gateway');
+
+      expect(received).not.toContain('200 Connection Established');
+      expect(upstream.authorities).toEqual(['non-anthropic.example:443']);
+    } finally {
+      client.destroy();
+      restoreProxyEnv();
+      await proxy.close();
+      await upstream.close();
+    }
+  });
+
+  it('dials CONNECT targets directly when HTTPS_PROXY names this proxy', async () => {
+    // `clodex server --proxy` prints its own bridge URL as setup instructions
+    // on a fixed default port, so a restart from that shell inherits a proxy
+    // URL addressing its own listener. Tunneling through it would CONNECT back
+    // into this handler, and again, until the process runs out of descriptors.
+    const target = await startEchoTarget();
+    const reservation = net.createServer();
+    const proxyPort = await listen(reservation);
+    await new Promise<void>(resolve => reservation.close(() => resolve()));
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${proxyPort}`);
+    // The warning goes through the parent-notice channel, not console.error,
+    // because `launchClaude` mutes the parent's stderr while the child runs.
+    const notices = captureParentNotices();
+    const connect = vi.spyOn(HttpsProxyAgent.prototype, 'connect');
+    const proxy = await startHttpProxy({ routes: [], port: proxyPort });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const reader = socketReader(client);
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${target.port} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${target.port}\r\n\r\nHELLO`,
+      );
+      const received = await reader.until('echo:HELLO');
+
+      expect(received).toContain('200 Connection Established');
+      expect(connect).not.toHaveBeenCalled();
+      expect(notices.lines()).toContain(
+        'clodex: HTTP(S)_PROXY points at this proxy; tunneling CONNECT direct',
+      );
+    } finally {
+      client.destroy();
+      restoreProxyEnv();
+      connect.mockRestore();
+      notices.restore();
+      await proxy.close();
+      await target.close();
+    }
+  });
+
+  it('warns once about an unusable proxy URL and keeps tunneling direct', async () => {
+    // The agent is built per proxy URL, not per CONNECT, so a standalone
+    // server does not repeat this line for every tunnel it opens.
+    const target = await startEchoTarget();
+    const restoreProxyEnv = replaceOutboundProxyEnv('not-a-url');
+    const notices = captureParentNotices();
+    const proxy = await startHttpProxy({ routes: [] });
+    // Startup warns once for the Anthropic passthrough agent; count only what
+    // the CONNECT path adds on top of it.
+    notices.clear();
+
+    const tunnel = async (): Promise<string> => {
+      const client = net.connect(proxy.port, proxy.host);
+      client.on('error', () => {});
+      const reader = socketReader(client);
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${target.port} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${target.port}\r\n\r\nHELLO`,
+      );
+      const received = await reader.until('echo:HELLO');
+      client.destroy();
+      return received;
+    };
+
+    try {
+      expect(await tunnel()).toContain('200 Connection Established');
+      expect(await tunnel()).toContain('200 Connection Established');
+
+      const warnings = notices.lines().filter(line =>
+        line.startsWith('clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel'));
+      expect(warnings).toHaveLength(1);
+    } finally {
+      restoreProxyEnv();
+      notices.restore();
+      await proxy.close();
+      await target.close();
+    }
+  });
+
+  it('dials passthrough CONNECT targets directly without HTTPS_PROXY', async () => {
+    let acceptTarget!: (socket: net.Socket) => void;
+    const targetAccepted = new Promise<net.Socket>(resolve => { acceptTarget = resolve; });
+    const targetServer = net.createServer(socket => acceptTarget(socket));
+    const targetPort = await listen(targetServer);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    let targetSocket: net.Socket | undefined;
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${targetPort}\r\n\r\n`,
+      );
+      const [response] = await once(client, 'data') as [Buffer];
+      targetSocket = await targetAccepted;
+
+      expect(response.toString()).toContain('200 Connection Established');
+      expect(targetSocket.remoteAddress).toBe('127.0.0.1');
+    } finally {
+      client.destroy();
+      targetSocket?.destroy();
+      await proxy.close();
+      await new Promise<void>(resolve => targetServer.close(() => resolve()));
+    }
+  });
+
   it('releases both sides of a passthrough CONNECT tunnel when upstream closes', async () => {
     const upstream = net.createServer(socket => socket.end());
     const upstreamPort = await listen(upstream);
@@ -420,6 +704,83 @@ describe('selective HTTP proxy', () => {
       for (const client of clients) client.destroy();
       await proxy.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));
+    }
+  });
+
+  it('handles a client reset in a passthrough CONNECT tunnel and tears down upstream', async () => {
+    let acceptUpstream!: (socket: net.Socket) => void;
+    const upstreamAccepted = new Promise<net.Socket>(resolve => { acceptUpstream = resolve; });
+    const upstreamServer = net.createServer(socket => {
+      socket.on('error', () => {});
+      socket.on('data', data => socket.write(data));
+      acceptUpstream(socket);
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => { uncaught.push(error); };
+    process.prependListener('uncaughtException', onUncaught);
+    let upstreamSocket: net.Socket | undefined;
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${upstreamPort} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${upstreamPort}\r\n\r\n`,
+      );
+      const [established] = await once(client, 'data') as [Buffer];
+      expect(established.toString()).toContain('200 Connection Established');
+      upstreamSocket = await upstreamAccepted;
+
+      client.write('ping');
+      const [echoed] = await once(client, 'data') as [Buffer];
+      expect(echoed.toString()).toBe('ping');
+      const upstreamClosed = once(upstreamSocket, 'close');
+      client.resetAndDestroy();
+      await Promise.race([
+        upstreamClosed,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error('upstream tunnel socket did not close after client reset')),
+          1_000,
+        )),
+      ]);
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(uncaught).toEqual([]);
+      expect(upstreamSocket.destroyed).toBe(true);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      client.destroy();
+      upstreamSocket?.destroy();
+      await proxy.close();
+      await new Promise<void>(resolve => upstreamServer.close(() => resolve()));
+    }
+  });
+
+  it('handles a client reset while answering a malformed CONNECT authority', async () => {
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => { uncaught.push(error); };
+    process.prependListener('uncaughtException', onUncaught);
+
+    try {
+      await once(client, 'connect');
+      // '[' is not a valid authority, so the handler takes the 400 branch.
+      client.write('CONNECT [ HTTP/1.1\r\nHost: x\r\n\r\n');
+      // Reset before the 400 is written so the write hits a dead socket.
+      await new Promise(resolve => setImmediate(resolve));
+      client.resetAndDestroy();
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      client.destroy();
+      await proxy.close();
     }
   });
 
@@ -1003,6 +1364,8 @@ describe('selective HTTP proxy', () => {
     let adapterAuth: string | undefined;
     let adapterApiKey: string | undefined;
     let adapterClaudeSessionId: string | undefined;
+    let adapterClaudeAgentId: string | undefined;
+    let adapterClaudeParentAgentId: string | undefined;
     let adapterBody = '';
     let anthropicRequests = 0;
     let fallbackAuth: string | undefined;
@@ -1028,6 +1391,8 @@ describe('selective HTTP proxy', () => {
       adapterAuth = req.headers.authorization;
       adapterApiKey = req.headers['x-api-key'] as string | undefined;
       adapterClaudeSessionId = req.headers['x-claude-code-session-id'] as string | undefined;
+      adapterClaudeAgentId = req.headers['x-claude-code-agent-id'] as string | undefined;
+      adapterClaudeParentAgentId = req.headers['x-claude-code-parent-agent-id'] as string | undefined;
       adapterBody = Buffer.concat(chunks).toString();
       await new Promise(resolve => setTimeout(resolve, 35));
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
@@ -1089,6 +1454,8 @@ describe('selective HTTP proxy', () => {
         'Host: api.anthropic.com',
         'Authorization: Bearer subscription-oauth-token',
         'X-Claude-Code-Session-Id: 11111111-1111-4111-8111-111111111111',
+        'X-Claude-Code-Agent-Id: agent-a1b2c3d4e5f60718',
+        'X-Claude-Code-Parent-Agent-Id: agent-main',
         'Content-Type: application/json',
         `Content-Length: ${Buffer.byteLength(body)}`,
         'Connection: close',
@@ -1102,6 +1469,10 @@ describe('selective HTTP proxy', () => {
       expect(adapterAuth).toBeUndefined();
       expect(adapterApiKey).toBe('adapter-local-token');
       expect(adapterClaudeSessionId).toBe('11111111-1111-4111-8111-111111111111');
+      // Subagent identity rides with the session id: the relay partitions
+      // ChatGPT WebSocket heads by it.
+      expect(adapterClaudeAgentId).toBe('agent-a1b2c3d4e5f60718');
+      expect(adapterClaudeParentAgentId).toBe('agent-main');
       expect(adapterBody).toBe(body);
       const relayEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = relayEntries.find(entry => !entry.event);

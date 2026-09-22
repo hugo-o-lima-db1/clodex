@@ -23,8 +23,11 @@ import {
   writeWebSocketDiagnosticLog,
 } from './trace-log.js';
 import {
+  isThreadContinuation,
   relayAnthropicMessages,
   resolveOAuthRetryReplacement,
+  THREAD_UNSUPPORTED_BODY,
+  upstreamHoldsThreads,
   UpstreamUnreachableError,
 } from './upstream-forward.js';
 import {
@@ -41,6 +44,7 @@ import {
   translateRequest as sdkTranslateRequest,
   streamAnthropicResponse,
   generateAnthropicResponse,
+  extractClaudeAgentIds,
   extractClaudeSessionId,
   sdkTranslationErrorSignature,
   silenceSdkWarnings,
@@ -58,6 +62,7 @@ import {
   estimateAnthropicInputTokens,
 } from './anthropic-endpoints.js';
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
+import { openCodeGoSessionHeaders } from './data/opencode-go-models.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
@@ -519,6 +524,20 @@ export async function startProxyCatalog(
         return;
       }
 
+      // A thread continuation carries only the messages after Claude Code's
+      // anchor. Only Anthropic's own API, reached by raw passthrough, holds the
+      // rest; any other upstream, and any translated route (the SDK does not
+      // send `thread`), would answer the fragment as if it were the whole
+      // conversation. Refuse it here, before any format branch, with the code
+      // Claude Code answers by resending the full history.
+      const holdsThreads = route.modelFormat === 'anthropic' && upstreamHoldsThreads(upstreamUrl);
+      if (!holdsThreads && isThreadContinuation(anthropicBody)) {
+        plog(() => `thread continuation refused: route=${route.realModelId} upstream does not hold threads`);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(THREAD_UNSUPPORTED_BODY);
+        return;
+      }
+
       if (!apiKey && routeAuthType !== 'none' && !usesSdkAdapter) {
         anthropicError(res, 401, 'Missing API key');
         return;
@@ -536,6 +555,14 @@ export async function startProxyCatalog(
 
         let effectiveBeta = inboundBeta;
         let claudeCodeSessionId: string | undefined;
+        const inboundSessionRaw = req.headers['x-claude-code-session-id'];
+        const goSessionHeaders = openCodeGoSessionHeaders(
+          { providerId: route.providerId, baseUrl: upstreamUrl },
+          extractClaudeSessionId(
+            anthropicBody,
+            Array.isArray(inboundSessionRaw) ? inboundSessionRaw[0] : inboundSessionRaw,
+          ),
+        );
         if (isOAuth) {
           // Identity injection and beta selection for Claude Code OAuth.
           const seed = route.providerId ?? route.realModelId;
@@ -555,7 +582,7 @@ export async function startProxyCatalog(
             authType: routeAuthType,
             log: message => plog(message),
             claudeCodeSessionId,
-            extraHeaders: route.headers,
+            extraHeaders: { ...route.headers, ...goSessionHeaders },
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
@@ -574,6 +601,9 @@ export async function startProxyCatalog(
                 && originalModel !== route.realModelId
                 ? originalModel
                 : undefined,
+            // An upstream that holds no threads must not hand Claude Code an id
+            // it would anchor the next request on.
+            anchorSafeMessageIds: !holdsThreads,
             onUpstreamError: inferenceLogPath
               ? (statusCode, errorContent) => writeInferenceResponseErrorLog(inferenceLogPath, {
                   modelId: originalModel,
@@ -602,6 +632,7 @@ export async function startProxyCatalog(
           ? req.headers['x-claude-code-session-id'][0]
           : req.headers['x-claude-code-session-id'];
         const claudeSessionId = extractClaudeSessionId(anthropicBody, claudeSessionIdHeader);
+        const claudeAgentIds = extractClaudeAgentIds(req.headers);
         const translationLifecycle = createTranslationLifecycle(
           inferenceLogPath,
           relayRequestId,
@@ -625,6 +656,11 @@ export async function startProxyCatalog(
               upstreamModelId: route.realModelId,
             },
           });
+          const goSdkSessionHeaders = openCodeGoSessionHeaders(
+            { providerId: route.providerId, baseUrl: route.baseURL },
+            claudeSessionId,
+          );
+          if (goSdkSessionHeaders) params.headers = { ...params.headers, ...goSdkSessionHeaders };
           plog(() =>
             `sdk: npm=${route.npm} model=${route.realModelId}, stream=${clientWantsStream}, ` +
             `tools=${anthropicBody.tools?.length ?? 0}, msgs=${params.messages.length}`,
@@ -686,7 +722,7 @@ export async function startProxyCatalog(
             keepAlive.unref();
             try {
               await withResponsesWebSocketDiagnosticContext(
-                { requestId: relayRequestId, claudeSessionId },
+                { requestId: relayRequestId, claudeSessionId, ...claudeAgentIds },
                 () => streamAnthropicResponse(
                   model,
                   params,
@@ -720,7 +756,7 @@ export async function startProxyCatalog(
             // outright ("Stream must be set to true"), so always stream internally
             // for it and collect the result, regardless of what the client asked for.
             const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-              { requestId: relayRequestId, claudeSessionId },
+              { requestId: relayRequestId, claudeSessionId, ...claudeAgentIds },
               () => generateAnthropicResponse(
                 model,
                 params,
