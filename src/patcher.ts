@@ -565,16 +565,19 @@ export function takeIgnoredLaunchOverride(): { used: string; ignored: string } |
 function isWrapperScript(filePath: string): boolean {
   try {
     if (lstatSync(filePath).isSymbolicLink()) return false;
+    // A wrapper's header comment can push its real marker past the first few
+    // hundred bytes; 8 KiB covers a launcher script and still reads nothing of a
+    // ~400 MB binary, which fails the shebang test on its first byte anyway.
     const fd = openSync(filePath, 'r');
-    const buf = Buffer.alloc(512);
-    const bytesRead = readSync(fd, buf, 0, 512, 0);
+    const buf = Buffer.alloc(8192);
+    const bytesRead = readSync(fd, buf, 0, 8192, 0);
     closeSync(fd);
     const head = buf.subarray(0, bytesRead).toString('utf8');
     if (!head.startsWith('#!')) return false;
     // Only what a launcher DOES counts. Matching the word "clodex" anywhere would
     // also match a script that merely mentions a path containing it.
     return /\bCLODEX_BIN\b/.test(head)
-      || /\bCLODEX_CLAUDE_PATH\s*=/.test(head)
+      || /\bexport\s+CLODEX_CLAUDE_PATH\b/.test(head)
       || /\bexec\b[^\n]*clodex[^\n]*\bclaude\b/.test(head);
   } catch {
     return false;
