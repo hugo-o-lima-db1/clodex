@@ -15,6 +15,7 @@ import {
   deepMergeProviderOptions,
   effortProviderOptions,
   thinkingProviderOptions,
+  isOpenRouterRoute,
   type ReasoningMetadata,
 } from './provider-factory.js';
 import { resolveUpstreamTools } from './tool-search.js';
@@ -29,6 +30,7 @@ import { emitParentNotice } from './parent-notice.js';
 import { CLAUDE_CODE_COMPACT_PROMPT_MARKERS } from './claude-code-compact-prompt.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 import { OpenAiThinkingBlock, openAiReasoningItemId, restoreOpenAiThinking } from './openai-thinking.js';
+import { NonStreamContent, addGeneratedContent } from './non-stream-content.js';
 
 export { silenceSdkWarnings };
 
@@ -331,16 +333,15 @@ function thinkingToSdkPart(
   block: AnthropicBlock,
   npm: string,
 ): Record<string, unknown> | null {
-  const text = block.thinking ?? '';
-  if (npm === '@ai-sdk/openai' && !block.signature && !text.trim()) return null;
+  // OpenAI reasoning clodex produced is restored from its own envelope before this
+  // point. Anything left is not provably OpenAI's: sent as encrypted content, a
+  // Claude signature fails the whole request (#274), and without it the SDK skips
+  // the part anyway. The cost is a clodex <= 2.11.3 transcript's raw ciphertext.
+  if (npm === '@ai-sdk/openai') return null;
 
-  const part: Record<string, unknown> = { type: 'reasoning', text };
-  if (block.signature) {
-    if (npm === '@ai-sdk/google') {
-      part.providerOptions = { google: { thoughtSignature: block.signature } };
-    } else if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/openai-compatible') {
-      part.providerOptions = { openai: { reasoningEncryptedContent: block.signature } };
-    }
+  const part: Record<string, unknown> = { type: 'reasoning', text: block.thinking ?? '' };
+  if (block.signature && npm === '@ai-sdk/google') {
+    part.providerOptions = { google: { thoughtSignature: block.signature } };
   }
   return part;
 }
@@ -687,8 +688,8 @@ export function translateRequest(
   // GPT-5.6+ public-API implicit mode also
   // honors the explicit breakpoints copied from Claude Code's cache_control
   // blocks, while retaining an automatic latest-message breakpoint as fallback.
+  const claudeSessionId = extractClaudeSessionId(body, options?.claudeSessionId);
   if (npm === '@ai-sdk/openai') {
-    const claudeSessionId = extractClaudeSessionId(body, options?.claudeSessionId);
     const serviceTier = options?.openAiOAuth ? oauthServiceTier() : undefined;
     providerOptions = deepMergeProviderOptions(providerOptions, {
       openai: {
@@ -715,18 +716,23 @@ export function translateRequest(
     maxOutputTokens: options?.openAiOAuth ? undefined : body.max_tokens,
     temperature: body.temperature,
     providerOptions,
+    // OpenRouter derives its own conversation key when none is sent, and routes a
+    // session's requests to one provider when one is. The value needs to be stable
+    // and unique, not recognizable, so the session UUID goes over hashed through
+    // the same key the OpenAI route's prompt_cache_key uses; the system/tools hash
+    // stays the fallback for clients that send no session identity.
+    ...(isOpenRouterRoute(npm, options?.reasoningMetadata)
+      ? {
+          headers: {
+            'x-session-id': claudeSessionId
+              ? claudeSessionPromptCacheKey(claudeSessionId)
+              : openAiPromptCacheKey(baseSystem, upstreamTools),
+          },
+        }
+      : {}),
   };
 }
 
-/**
- * Service tier for ChatGPT-OAuth (Codex backend) requests — Codex "fast mode"
- * (Codex CLI config `service_tier = "fast"`; wire value `priority`). Applied
- * ONLY on the OAuth route, and only after alias/remap resolution, so an alias
- * that resolves to a ChatGPT model gets the tier while the same worker slot
- * remapped to a non-OpenAI provider never sends it. API-key OpenAI is
- * deliberately excluded: on the public API `priority` is a billable per-token
- * surcharge, not a plan feature. Absence preserves the backend default exactly.
- */
 /**
  * Whether a route is the ChatGPT-OAuth (Codex) backend — the only one that
  * carries a service tier.
@@ -745,6 +751,15 @@ const SERVICE_TIERS = new Set(['auto', 'default', 'flex', 'priority']);
 let warnedInvalidServiceTier = false;
 let warnedUnsupportedServiceTier = false;
 
+/**
+ * Service tier for ChatGPT-OAuth (Codex backend) requests — Codex "fast mode"
+ * (Codex CLI config `service_tier = "fast"`; wire value `priority`). Applied
+ * ONLY on the OAuth route, and only after alias/remap resolution, so an alias
+ * that resolves to a ChatGPT model gets the tier while the same worker slot
+ * remapped to a non-OpenAI provider never sends it. API-key OpenAI is
+ * deliberately excluded: on the public API `priority` is a billable per-token
+ * surcharge, not a plan feature. Absence preserves the backend default exactly.
+ */
 export function oauthServiceTier(): string | undefined {
   const raw = process.env.CLODEX_SERVICE_TIER;
   if (raw === undefined || raw.trim() === '') return undefined;
@@ -1211,8 +1226,14 @@ export async function generateAnthropicResponse(
     idleTimeoutMs?: number;
   },
 ): Promise<Record<string, unknown>> {
-  let text: string;
-  let toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
+  const requiredProps = toolRequiredProps(params.tools);
+  const content = new NonStreamContent();
+  const addToolCall = (tc: FullStreamPart) => content.push({
+    type: 'tool_use',
+    id: encodeToolUseId(tc.toolCallId ?? '', grabRoundTripSignature(tc)),
+    name: tc.toolName,
+    input: representableToolInput(sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName ?? ''))),
+  });
   let finishReason: string;
   let usage: SdkUsage | undefined;
   let warnings: unknown;
@@ -1240,8 +1261,6 @@ export async function generateAnthropicResponse(
     );
     // See the streaming path above: Relay owns these timers and explicitly
     // settles its controller when the stream has been fully reduced.
-    const streamedText: string[] = [];
-    const streamedToolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }> = [];
     let streamedFinishReason = 'stop';
     let streamedUsage: SdkUsage | undefined;
     try {
@@ -1265,17 +1284,11 @@ export async function generateAnthropicResponse(
             ? part.error
             : new Error(typeof part.error === 'string' ? part.error : 'Upstream stream failed');
         }
-        if (part.type === 'text-delta') streamedText.push(part.text ?? '');
-        else if (part.type === 'tool-call') {
-          streamedToolCalls.push({
-            toolCallId: part.toolCallId ?? '',
-            toolName: part.toolName ?? '',
-            input: part.input,
-          });
-        } else if (part.type === 'finish') {
+        if (part.type === 'tool-call') addToolCall(part);
+        else if (part.type === 'finish') {
           streamedFinishReason = part.finishReason ?? streamedFinishReason;
           streamedUsage = part.totalUsage;
-        }
+        } else content.add(part);
       }
       if (abortSignal.aborted) throw streamAbortError(abortSignal);
     } finally {
@@ -1286,8 +1299,6 @@ export async function generateAnthropicResponse(
       // result is fully reduced so Node can release AI SDK's listener graph.
       if (!forceAbort.signal.aborted) forceAbort.abort();
     }
-    text = streamedText.join('');
-    toolCalls = streamedToolCalls;
     finishReason = streamedFinishReason;
     usage = streamedUsage;
   } else {
@@ -1308,7 +1319,8 @@ export async function generateAnthropicResponse(
         maxRetries,
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
-      ({ text, toolCalls, finishReason, usage, warnings } = r);
+      ({ finishReason, usage, warnings } = r);
+      addGeneratedContent(content, r.content as FullStreamPart[], addToolCall);
     } catch (error) {
       if (generateAbort.signal.aborted) throw streamAbortError(generateAbort.signal);
       throw error;
@@ -1321,18 +1333,9 @@ export async function generateAnthropicResponse(
 
   reportUnsupportedServiceTier(params, warnings);
   reportPromptTokens({ onPromptTokens: options?.onPromptTokens }, usage);
-  const requiredProps = toolRequiredProps(params.tools);
   return {
     id: translatedMessageId(), type: 'message', role: 'assistant', model: modelId,
-    content: [
-      ...(text ? [{ type: 'text', text }] : []),
-      ...toolCalls.map(tc => ({
-        type: 'tool_use',
-        id: encodeToolUseId(tc.toolCallId, grabRoundTripSignature(tc as FullStreamPart)),
-        name: tc.toolName,
-        input: representableToolInput(sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName))),
-      })),
-    ],
+    content: content.content(),
     stop_reason: finishReason === 'tool-calls' ? 'tool_use' : 'end_turn',
     usage: toAnthropicUsage(usage),
   };

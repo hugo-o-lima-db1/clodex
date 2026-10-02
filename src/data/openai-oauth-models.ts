@@ -31,6 +31,7 @@ interface OAuthModelSeed {
   /** Backend capability seed — mirrors the live use_responses_lite/prefer_websockets flags. */
   useResponsesLite?: boolean;
   preferWebSockets?: boolean;
+  minimalClientVersion?: string;
 }
 
 /**
@@ -38,8 +39,8 @@ interface OAuthModelSeed {
  * full request, not just the overage. That is why the Codex-reported window sits
  * here rather than at the model ceiling.
  */
-const GPT_5_6_PRICING_BOUNDARY = 272_000;
-const GPT_5_6_PRICING_NOTE =
+const GPT_HIGH_CONTEXT_PRICING_BOUNDARY = 272_000;
+const GPT_HIGH_CONTEXT_PRICING_NOTE =
   'Above it, OpenAI prices the full request at 2x input and 1.5x output.';
 
 // Models that the ChatGPT Codex backend (chatgpt.com/backend-api/codex) explicitly rejects
@@ -56,25 +57,34 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // Ceilings are what the Codex catalog reports, which is lower than the published
 // model spec and varies by plan, so discovery overrides these whenever it answers.
 // A model with no ceiling here has none above its default window.
+// Minimum client versions and transport flags checked against the live catalog on 2026-09-24.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
-  // GPT-6 family. The window and ceiling are what the live Codex catalog returned on
-  // 2026-09-04 and are deliberately NOT the published API numbers: the model card
-  // lists a 1,050,000 context window, but the Codex client is served a smaller one,
-  // and this path is Codex-only. Output limit and the pricing band come from the
-  // card (https://developers.openai.com/api/docs/models/gpt-6-astra), which states
-  // "Prompts with more than 272K input tokens are priced at 2x input and cache rates
-  // and 1.5x output for the full request" — the same boundary the GPT-5.6 family has.
-  { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  // GPT-6.1 Sol: the 272K window and 872K ceiling are what the live Codex catalog
+  // returned on 2026-09-29; a request near 872K has not been tried. The output limit
+  // is the model card's. The catalog reports minimal_client_version 0.153.0, but on a
+  // Plus account versions through 0.158.0 were refused and 0.159.0 worked (#298), so
+  // this seed records that observed gate. A live refresh stores the catalog's value
+  // instead. CODEX_RESPONSES_LITE_VERSION must stay at or above this.
+  { id: 'gpt-6.1-sol',          name: 'GPT-6.1 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.159.0' },
+  // GPT-6 family. The window, ceiling and Responses-Lite flags are what the live
+  // Codex catalog returned (Astra on 2026-09-04, Sol and Luna on 2026-09-22) and are
+  // deliberately NOT the published API numbers: the model cards list a 1,050,000
+  // context window, but the Codex client is served a smaller one, and this path is
+  // Codex-only. All three cards publish a 128,000 output limit and the same 272K
+  // pricing boundary as the GPT-5.6 family.
+  { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.153.0' },
+  { id: 'gpt-6-sol',            name: 'GPT-6 Sol',         contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.155.0' },
+  { id: 'gpt-6-luna',           name: 'GPT-6 Luna',        contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.155.0' },
   // "An alias for our flagship general-purpose models, with safeguards calibrated
   // for defensive cybersecurity work" — access is gated on a separate opt-in
   // program, so most installs will never see this id in their catalog.
-  { id: 'gpt-daybreak-blue-latest', name: 'GPT Daybreak Blue', contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-daybreak-blue-latest', name: 'GPT Daybreak Blue', contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.144.0' },
   // GPT-5.6 family (Sol / Terra / Luna)
-  { id: 'gpt-5.6-sol',          name: 'GPT-5.6 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
-  { id: 'gpt-5.6-terra',        name: 'GPT-5.6 Terra',     contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
-  { id: 'gpt-5.6-luna',         name: 'GPT-5.6 Luna',      contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-5.6-sol',          name: 'GPT-5.6 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.144.0' },
+  { id: 'gpt-5.6-terra',        name: 'GPT-5.6 Terra',     contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.144.0' },
+  { id: 'gpt-5.6-luna',         name: 'GPT-5.6 Luna',      contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.144.0' },
   // GPT-5.5 family (Pro)
-  { id: 'gpt-5.5',              name: 'GPT-5.5',           contextWindow: 272_000, maxOutputTokens: 128_000, reasoning: true },
+  { id: 'gpt-5.5',              name: 'GPT-5.5',           contextWindow: 272_000, maxContextWindow: 272_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: false, preferWebSockets: true, minimalClientVersion: '0.124.0' },
   // GPT-5.4 family
   { id: 'gpt-5.4',              name: 'GPT-5.4',           contextWindow: 272_000, maxContextWindow: 1_000_000 },
   { id: 'gpt-5.4-mini',         name: 'GPT-5.4 Mini',      contextWindow: 272_000 },
@@ -109,16 +119,16 @@ function hasPricingBoundary(id: string): boolean {
 }
 
 /**
- * Pricing-band metadata for a Codex model id, applied to discovered models too so a
- * model that is not in the seed still reports its boundary.
+ * Pricing-band metadata for OpenAI model ids on both API keys and Codex plans.
+ * Applied to discovered models too so models outside the seed report their boundary.
  */
 export function openAiPricingMetadata(
   id: string,
 ): { pricingBoundary?: number; pricingBoundaryNote?: string } {
   if (!hasPricingBoundary(id)) return {};
   return {
-    pricingBoundary: GPT_5_6_PRICING_BOUNDARY,
-    pricingBoundaryNote: GPT_5_6_PRICING_NOTE,
+    pricingBoundary: GPT_HIGH_CONTEXT_PRICING_BOUNDARY,
+    pricingBoundaryNote: GPT_HIGH_CONTEXT_PRICING_NOTE,
   };
 }
 
@@ -167,6 +177,16 @@ function migratedEffectiveContextPercent(cached: number | undefined): number | u
  * knows — the effort selector stayed hidden until they happened to re-run
  * `clodex providers refresh-models`. Only seeded ids are affected; anything absent
  * from the seed keeps its cached value.
+ *
+ * `contextWindow`, `useResponsesLite` and `preferWebSockets` are backfilled, never
+ * overridden: the Codex catalog does report them, so a cached value — `false`
+ * included — is a provider answer. The flags go missing on a row an older clodex wrote
+ * before it seeded the id, through a fallback catalog that does not carry them; left
+ * absent, a Responses-Lite model (GPT-6, Daybreak Blue) is sent without the headers the
+ * backend requires and every request is refused. The window goes missing only on rows
+ * written after refresh stopped persisting an invented default window (earlier rows
+ * carry an explicit 200,000, which is kept). For GPT-6 ids an absent window lets the
+ * 1,050,000 heuristic clamp to the ceiling instead of the standard window.
  */
 export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedModel[] {
   const seedById = new Map(buildOpenAiOAuthModels().map(model => [model.id, model]));
@@ -175,6 +195,7 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
     const pricing = openAiPricingMetadata(model.id);
     return {
       ...model,
+      contextWindow: model.contextWindow ?? seed?.contextWindow,
       maxContextWindow: model.maxContextWindow ?? seed?.maxContextWindow,
       effectiveContextPercent: migratedEffectiveContextPercent(model.effectiveContextPercent),
       pricingBoundary: model.pricingBoundary ?? seed?.pricingBoundary ?? pricing.pricingBoundary,
@@ -183,6 +204,9 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
         ?? pricing.pricingBoundaryNote,
       maxOutputTokens: model.maxOutputTokens ?? seed?.maxOutputTokens,
       reasoning: seed?.reasoning ?? model.reasoning,
+      useResponsesLite: model.useResponsesLite ?? seed?.useResponsesLite,
+      preferWebSockets: model.preferWebSockets ?? seed?.preferWebSockets,
+      minimalClientVersion: model.minimalClientVersion ?? seed?.minimalClientVersion,
     };
   });
 }
@@ -208,6 +232,7 @@ export function buildOpenAiOAuthModels(): CachedModel[] {
       reasoning: seed.reasoning,
       useResponsesLite: seed.useResponsesLite,
       preferWebSockets: seed.preferWebSockets,
+      minimalClientVersion: seed.minimalClientVersion,
     };
   });
 }
