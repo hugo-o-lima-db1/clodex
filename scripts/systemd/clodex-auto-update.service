@@ -1,0 +1,14 @@
+[Unit]
+Description=Auto-update local clodex fork (rebuild after pull)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=CLODEX_REPO=/home/hugolima/clodex
+Environment=CLODEX_BRANCH=feat/verboo-provider
+Environment=HOME=/home/hugolima
+ExecStart=/home/hugolima/clodex/scripts/auto-update.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

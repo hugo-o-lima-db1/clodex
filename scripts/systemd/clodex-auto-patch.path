@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch for Claude Code self-updates
+
+[Path]
+PathChanged=/home/hugolima/.local/share/claude/versions
+
+[Install]
+WantedBy=default.target

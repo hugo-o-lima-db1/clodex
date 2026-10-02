@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily auto-update of local clodex fork
+
+[Timer]
+# 04:35 America/Sao_Paulo = 07:35 UTC; the fork's sync-upstream workflow
+# runs at 07:17 UTC, so this fires ~18 min after the fork is refreshed.
+OnCalendar=*-*-* 04:35:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

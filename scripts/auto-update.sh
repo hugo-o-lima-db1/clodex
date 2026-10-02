@@ -47,4 +47,8 @@ git reset --hard --quiet "origin/$BRANCH"
 pnpm install --frozen-lockfile 2>&1 | tail -3 || pnpm install 2>&1 | tail -3
 pnpm build 2>&1 | tail -3
 
+# A rebuilt clodex changes the patch config hash, so the binary patched against
+# the old build is stale even though Claude Code itself did not move.
+"$(dirname "$0")/auto-patch.sh" || echo "auto-patch reported a problem; see its own log"
+
 echo "=== $(date -Is) done (updated) ==="

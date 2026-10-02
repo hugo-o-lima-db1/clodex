@@ -1,0 +1,11 @@
+[Unit]
+Description=Patch Claude Code for clodex favorites after it updates itself
+
+[Service]
+Type=oneshot
+Environment=CLODEX_REPO=/home/hugolima/clodex
+Environment=HOME=/home/hugolima
+ExecStart=/home/hugolima/clodex/scripts/auto-patch.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
