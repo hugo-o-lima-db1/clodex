@@ -194,6 +194,26 @@ function toolCallPartToCloudCode(
   return result;
 }
 
+/**
+ * Replay a reasoning turn in the only shape the target accepts.
+ *
+ * Gemini takes a thought part as it is. Anthropic-Vertex refuses one without its
+ * signature ("thinking.signature: Field required") AND refuses a signature it did
+ * not issue ("Invalid `signature` in `thinking` block") — and it never emits a
+ * thought part of its own, so there is no signature to carry back. Measured on
+ * claude-opus-5-5-high, Sep 2026. The reasoning still reaches the model, as plain
+ * assistant text, which that same request accepts.
+ */
+function reasoningPartToCloudCode(
+  part: V2PromptPart,
+  options: { thoughtPartsAccepted: boolean },
+): CloudCodePart | null {
+  if (!part.text) return null;
+  return options.thoughtPartsAccepted
+    ? { text: part.text, thought: true }
+    : { text: part.text };
+}
+
 /** Model id prefix → whether tool-call history can be sent verbatim. */
 export function supportsSignaturelessToolCalls(modelId: string): boolean {
   return modelId.startsWith('claude');
@@ -233,13 +253,7 @@ export function translatePromptToCloudCode(
         ? toolResultPartToCloudCode(part)
         : message.role === 'assistant'
           ? (part.type === 'reasoning'
-              ? (!signaturelessToolCallsAsText || !part.text
-                  // Anthropic-Vertex rejects a thinking block replayed without its
-                  // signature ("thinking.signature: Field required", HTTP 400), and
-                  // discovery hands none back, so the turn cannot be reconstructed.
-                  // A model switch mid-conversation is enough to carry one in.
-                  ? null
-                  : { text: part.text, thought: true })
+              ? reasoningPartToCloudCode(part, { thoughtPartsAccepted: signaturelessToolCallsAsText })
               : toolCallPartToCloudCode(part, { signaturelessToolCallsAsText })
                 ?? filePartToCloudCode(part)
                 ?? textPartToCloudCode(part))

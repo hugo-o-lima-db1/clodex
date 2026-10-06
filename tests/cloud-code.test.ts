@@ -145,12 +145,12 @@ describe('translatePromptToCloudCode', () => {
     )).toThrow(/no content Cloud Code accepts/i);
   });
 
-  it('drops reasoning history for Claude models, which reject it unsigned', () => {
-    // Anthropic-Vertex answers a thinking block replayed without its signature
-    // with "messages.1.content.0.thinking.signature: Field required" (HTTP 400),
-    // and discovery never hands one back, so the turn cannot be reconstructed.
-    // Switching models mid-conversation is enough to carry one in: the reasoning
-    // came from whichever model produced it, not from this one.
+  it('replays reasoning to Claude models as plain text, the only shape they accept', () => {
+    // A thinking block comes back refused twice over: without a signature
+    // ("thinking.signature: Field required") and with one Anthropic-Vertex did not
+    // issue ("Invalid `signature` in `thinking` block"). It emits no thought part
+    // of its own either, so no signature can ever be carried back — but the same
+    // request succeeds when the reasoning arrives as ordinary assistant text.
     const envelope = translatePromptToCloudCode(
       [
         { role: 'user', content: 'quanto e 2+2?' },
@@ -159,12 +159,13 @@ describe('translatePromptToCloudCode', () => {
       ],
       { modelId: 'claude-opus-5-5-high' },
     );
-    expect(envelope.request.contents[1]).toEqual({ role: 'model', parts: [{ text: '4' }] });
+    expect(envelope.request.contents[1]).toEqual({
+      role: 'model',
+      parts: [{ text: 'somando' }, { text: '4' }],
+    });
   });
 
-  it('keeps an assistant turn whose only content was reasoning out of the history', () => {
-    // Dropping the reasoning can empty the turn, and a content with no parts is
-    // itself rejected ("contents.parts must not be empty").
+  it('keeps a turn made only of reasoning, instead of sending it empty', () => {
     const envelope = translatePromptToCloudCode(
       [
         { role: 'user', content: 'oi' },
@@ -173,8 +174,20 @@ describe('translatePromptToCloudCode', () => {
       ],
       { modelId: 'claude-sonnet-5-5-high' },
     );
+    expect(envelope.request.contents).toHaveLength(3);
+    expect(envelope.request.contents[1]).toEqual({ role: 'model', parts: [{ text: 'pensando' }] });
     expect(envelope.request.contents.every(c => c.parts.length > 0)).toBe(true);
-    expect(envelope.request.contents).toHaveLength(2);
+  });
+
+  it('still sends Gemini reasoning as a thought part', () => {
+    const envelope = translatePromptToCloudCode(
+      [{ role: 'assistant', content: [{ type: 'reasoning', text: 'pensando...' }, { type: 'text', text: 'Olá' }] }],
+      { modelId: 'gemini-3.6-flash-low' },
+    );
+    expect(envelope.request.contents[0].parts).toEqual([
+      { text: 'pensando...', thought: true },
+      { text: 'Olá' },
+    ]);
   });
 
   it('maps reasoning history to thought parts', () => {
