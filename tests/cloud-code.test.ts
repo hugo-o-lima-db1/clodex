@@ -439,6 +439,20 @@ describe('language model wiring', () => {
       });
   });
 
+  it('carries the provider raw body on the error, so the log can record it', async () => {
+    // formatUpstreamError records the full payload as errorContent, but only for
+    // errors that expose one: a plain Error fell through to "Upstream model
+    // request failed." and the reason had to be recovered by instrumenting the
+    // adapter by hand. Twice.
+    const body = '[{"error":{"code":400,"message":"tools.1.custom.input_schema: JSON schema is invalid.","status":"INVALID_ARGUMENT"}}]';
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 400 })));
+    const model = createCloudCodeLanguageModel({ modelId: 'claude-opus-5-5-high', apiKey: 'tok' }) as {
+      doStream: (options: Record<string, unknown>) => Promise<unknown>;
+    };
+    await expect(model.doStream({ prompt: [{ role: 'user', content: 'oi' }] }))
+      .rejects.toMatchObject({ statusCode: 400, responseBody: body });
+  });
+
   it('emits tool-call parts with the round-trip signature providerMetadata', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
       JSON.stringify([{

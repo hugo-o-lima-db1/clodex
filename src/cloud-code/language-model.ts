@@ -45,9 +45,17 @@ interface CloudCodeErrorShape {
   error?: { code?: number; message?: string; status?: string };
 }
 
-async function readErrorBody(response: Response): Promise<string> {
+interface CloudCodeErrorBody {
+  /** One line for the user. */
+  message: string;
+  /** Exactly what the provider sent, for the diagnostic log. */
+  raw: string;
+}
+
+async function readErrorBody(response: Response): Promise<CloudCodeErrorBody> {
+  let text = '';
   try {
-    const text = await response.text();
+    text = await response.text();
     try {
       // streamGenerateContent wraps the error in an array, so the object-only
       // read used to fall through to the raw body — whose first line is "[{",
@@ -55,14 +63,17 @@ async function readErrorBody(response: Response): Promise<string> {
       const parsed = JSON.parse(text) as CloudCodeErrorShape | CloudCodeErrorShape[];
       const error = (Array.isArray(parsed) ? parsed.find(entry => entry?.error?.message) : parsed)?.error;
       if (error?.message) {
-        return `${error.message.trim()}${error.status ? ` (${error.status})` : ''}`;
+        return {
+          message: `${error.message.trim()}${error.status ? ` (${error.status})` : ''}`,
+          raw: text,
+        };
       }
     } catch {
       // non-JSON body — fall through to the raw text
     }
-    return text.replace(/\s+/g, ' ').trim().slice(0, 500);
+    return { message: text.replace(/\s+/g, ' ').trim().slice(0, 500), raw: text };
   } catch {
-    return `HTTP ${response.status}`;
+    return { message: `HTTP ${response.status}`, raw: text };
   }
 }
 
@@ -81,14 +92,22 @@ async function requestGenerate(
   });
 }
 
-function errorWithStatus(message: string, statusCode: number): Error {
-  const err = new Error(`${message} (HTTP ${statusCode})`);
-  (err as Error & { statusCode?: number }).statusCode = statusCode;
+function errorWithStatus(message: string, statusCode: number, responseBody?: string): Error {
+  const err = new Error(`${message} (HTTP ${statusCode})`) as Error & {
+    statusCode?: number;
+    responseBody?: string;
+  };
+  err.statusCode = statusCode;
+  // The shape formatUpstreamError reads to record errorContent in the inference
+  // log. Without it a failure reaches that log as the generic fallback and the
+  // provider's own words are lost.
+  if (responseBody) err.responseBody = responseBody;
   return err;
 }
 
 async function throwForResponse(response: Response): Promise<never> {
-  throw errorWithStatus(await readErrorBody(response), response.status);
+  const { message, raw } = await readErrorBody(response);
+  throw errorWithStatus(message, response.status, raw);
 }
 
 // ── chunk → V2 stream parts ──────────────────────────────────────────────────
