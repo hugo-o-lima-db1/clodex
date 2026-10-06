@@ -145,6 +145,38 @@ describe('translatePromptToCloudCode', () => {
     )).toThrow(/no content Cloud Code accepts/i);
   });
 
+  it('drops reasoning history for Claude models, which reject it unsigned', () => {
+    // Anthropic-Vertex answers a thinking block replayed without its signature
+    // with "messages.1.content.0.thinking.signature: Field required" (HTTP 400),
+    // and discovery never hands one back, so the turn cannot be reconstructed.
+    // Switching models mid-conversation is enough to carry one in: the reasoning
+    // came from whichever model produced it, not from this one.
+    const envelope = translatePromptToCloudCode(
+      [
+        { role: 'user', content: 'quanto e 2+2?' },
+        { role: 'assistant', content: [{ type: 'reasoning', text: 'somando' }, { type: 'text', text: '4' }] },
+        { role: 'user', content: 'e 3+3?' },
+      ],
+      { modelId: 'claude-opus-5-5-high' },
+    );
+    expect(envelope.request.contents[1]).toEqual({ role: 'model', parts: [{ text: '4' }] });
+  });
+
+  it('keeps an assistant turn whose only content was reasoning out of the history', () => {
+    // Dropping the reasoning can empty the turn, and a content with no parts is
+    // itself rejected ("contents.parts must not be empty").
+    const envelope = translatePromptToCloudCode(
+      [
+        { role: 'user', content: 'oi' },
+        { role: 'assistant', content: [{ type: 'reasoning', text: 'pensando' }] },
+        { role: 'user', content: 'e agora?' },
+      ],
+      { modelId: 'claude-sonnet-5-5-high' },
+    );
+    expect(envelope.request.contents.every(c => c.parts.length > 0)).toBe(true);
+    expect(envelope.request.contents).toHaveLength(2);
+  });
+
   it('maps reasoning history to thought parts', () => {
     const envelope = translatePromptToCloudCode(
       [

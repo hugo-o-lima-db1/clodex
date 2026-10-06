@@ -233,7 +233,13 @@ export function translatePromptToCloudCode(
         ? toolResultPartToCloudCode(part)
         : message.role === 'assistant'
           ? (part.type === 'reasoning'
-              ? (part.text ? { text: part.text, thought: true } : null)
+              ? (!signaturelessToolCallsAsText || !part.text
+                  // Anthropic-Vertex rejects a thinking block replayed without its
+                  // signature ("thinking.signature: Field required", HTTP 400), and
+                  // discovery hands none back, so the turn cannot be reconstructed.
+                  // A model switch mid-conversation is enough to carry one in.
+                  ? null
+                  : { text: part.text, thought: true })
               : toolCallPartToCloudCode(part, { signaturelessToolCallsAsText })
                 ?? filePartToCloudCode(part)
                 ?? textPartToCloudCode(part))
