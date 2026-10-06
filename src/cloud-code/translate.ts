@@ -90,9 +90,13 @@ const CLOUD_CODE_SCHEMA_KEYS = new Set([
 ]);
 
 /** Rebuild a tool input schema with only the keys Cloud Code accepts, UPPERCASEd types. */
-export function uppercaseSchemaTypes(schema: unknown): Record<string, unknown> {
+export function uppercaseSchemaTypes(
+  schema: unknown,
+  options: { anyOfSupported?: boolean } = {},
+): Record<string, unknown> {
+  const anyOfSupported = options.anyOfSupported !== false;
   if (Array.isArray(schema)) {
-    return schema.map(item => (item && typeof item === 'object' ? uppercaseSchemaTypes(item) : item)) as unknown as Record<string, unknown>;
+    return schema.map(item => (item && typeof item === 'object' ? uppercaseSchemaTypes(item, options) : item)) as unknown as Record<string, unknown>;
   }
   if (!schema || typeof schema !== 'object') return {};
   const out: Record<string, unknown> = {};
@@ -105,13 +109,23 @@ export function uppercaseSchemaTypes(schema: unknown): Record<string, unknown> {
     } else if (key === 'properties' && value && typeof value === 'object') {
       // name → schema map: property names are data, not schema keys.
       out[key] = Object.fromEntries(
-        Object.entries(value as Record<string, unknown>).map(([name, sub]) => [name, uppercaseSchemaTypes(sub)]),
+        Object.entries(value as Record<string, unknown>).map(([name, sub]) => [name, uppercaseSchemaTypes(sub, options)]),
       );
     } else if (typeof value === 'object' && value !== null) {
-      out[key] = uppercaseSchemaTypes(value);
+      out[key] = uppercaseSchemaTypes(value, options);
     } else {
       out[key] = value;
     }
+  }
+  // Anthropic refuses any anyOf as not draft 2020-12, and one tool is enough to
+  // fail the request. Branches that agree on a type collapse to it; branches that
+  // disagree leave a field with no type, which accepts anything — the call stays
+  // possible, which dropping the tool would not.
+  if (!anyOfSupported && Array.isArray(out.anyOf)) {
+    const branches = out.anyOf as Array<Record<string, unknown>>;
+    const types = new Set(branches.map(branch => branch?.type).filter(Boolean));
+    delete out.anyOf;
+    if (types.size === 1 && out.type === undefined) out.type = [...types][0];
   }
   // Every array must declare `items` ("items: missing field", HTTP 400), and the
   // keyword that described a tuple's members — prefixItems — is not one Cloud
@@ -282,7 +296,9 @@ export function translatePromptToCloudCode(
       functionDeclarations: tools.map(tool => ({
         name: tool.name,
         ...(tool.description ? { description: tool.description } : {}),
-        ...(tool.inputSchema ? { parameters: uppercaseSchemaTypes(tool.inputSchema) } : {}),
+        ...(tool.inputSchema
+          ? { parameters: uppercaseSchemaTypes(tool.inputSchema, { anyOfSupported: signaturelessToolCallsAsText }) }
+          : {}),
       })),
     }];
   }

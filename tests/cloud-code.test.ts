@@ -227,6 +227,35 @@ describe('schema/finish/usage mapping', () => {
     expect(props.tags.items).toEqual({});
   });
 
+  it('flattens anyOf for Claude models, which reject it outright', () => {
+    // Claude models on Cloud Code hand their tools to Anthropic, which answers
+    // ANY anyOf with "tools.N.custom.input_schema: JSON schema is invalid. It must
+    // match JSON Schema draft 2020-12" — measured on claude-opus-5-5-high in every
+    // form: lowercase, uppercase, and alongside a sibling type. One such tool
+    // fails the whole request, and Claude Code's own tools use anyOf.
+    const schema = uppercaseSchemaTypes({
+      type: 'object',
+      properties: {
+        mesmoTipo: { anyOf: [{ type: 'string' }, { type: 'string', maxLength: 5 }] },
+        tiposMistos: { description: 'um ou outro', anyOf: [{ type: 'string' }, { type: 'number' }] },
+      },
+    }, { anyOfSupported: false });
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    // All branches agreed on a type, so it survives as that type.
+    expect(props.mesmoTipo).toEqual({ type: 'STRING' });
+    // They did not, so the field keeps its description and accepts anything.
+    expect(props.tiposMistos).toEqual({ description: 'um ou outro' });
+  });
+
+  it('keeps anyOf for Gemini, which accepts it', () => {
+    const schema = uppercaseSchemaTypes({
+      type: 'object',
+      properties: { a: { anyOf: [{ type: 'string' }, { type: 'number' }] } },
+    }, { anyOfSupported: true });
+    const props = schema.properties as Record<string, Record<string, unknown>>;
+    expect(props.a.anyOf).toEqual([{ type: 'STRING' }, { type: 'NUMBER' }]);
+  });
+
   it('maps finish reasons and usage (thoughts count toward output)', () => {
     expect(mapFinishReason('STOP')).toBe('stop');
     expect(mapFinishReason('MAX_TOKENS')).toBe('length');
